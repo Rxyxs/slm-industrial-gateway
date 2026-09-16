@@ -1,0 +1,51 @@
+services:
+  slm-api:
+    build: .
+    image: slm-openai-gateway:latest
+    container_name: slm-api
+    restart: unless-stopped
+    # Solo accesible desde el propio host; no se expone a la red pública.
+    ports:
+      - "127.0.0.1:8000:8000"
+    environment:
+      MODEL_NAME: ${MODEL_NAME:-local-slm}
+      MODEL_PATH: ${MODEL_PATH:-/app/data/models/model.gguf}
+      MODEL_N_CTX: ${MODEL_N_CTX:-4096}
+      # Modelo juez usado por el evaluador de fidelidad (src/evaluation).
+      # Puede apuntar a un endpoint OpenAI-compatible local para no depender
+      # de una API externa en despliegues con red aislada.
+      DEEPEVAL_JUDGE_MODEL: ${DEEPEVAL_JUDGE_MODEL:-gpt-4o-mini}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      OPENAI_BASE_URL: ${OPENAI_BASE_URL:-}
+    volumes:
+      - ./data/models:/app/data/models:ro
+    networks:
+      - slm-internal
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 30s
+      timeout: 5s
+      start_period: 15s
+      retries: 3
+
+  prometheus:
+    image: prom/prometheus:v3.0.1
+    container_name: slm-prometheus
+    restart: unless-stopped
+    # Solo accesible desde el propio host, igual que la API.
+    ports:
+      - "127.0.0.1:9090:9090"
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    networks:
+      - slm-internal
+    depends_on:
+      - slm-api
+
+networks:
+  slm-internal:
+    driver: bridge
+
+volumes:
+  prometheus-data:

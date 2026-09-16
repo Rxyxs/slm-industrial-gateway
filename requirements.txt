@@ -1,0 +1,36 @@
+# Motor de inferencia (src/engine)
+llama-cpp-python==0.3.4
+psutil==6.1.0
+
+# API HTTP compatible con OpenAI (src/api)
+fastapi==0.141.1
+uvicorn[standard]==0.53.0
+pydantic==2.13.5
+prometheus-client==0.26.0
+prometheus-fastapi-instrumentator==8.1.0
+
+# Evaluación de fidelidad y alucinación (src/evaluation)
+deepeval==4.2.3
+
+# Fine-tuning QLoRA, herramientas y guardrails (src/training, src/tools, src/guardrails)
+#
+# unsloth==2026.9.5 fija el resto de su propio stack (ver su metadata de
+# distribución): torch<2.13.0, transformers<=5.5.0 (con exclusiones puntuales),
+# trl<=0.24.0 (excluye 0.19.0), peft>=0.18.0, bitsandbytes>=0.45.5 (excluye
+# 0.46.0 y 0.48.0), datasets<4.4.0 (excluye 4.0.x/4.1.0). NO subir trl a la
+# línea 1.x (requiere transformers>=4.56.2 pero es incompatible con el techo
+# trl<=0.24.0 de unsloth) sin antes revisar que unsloth ya soporte esa línea.
+numpy==2.2.6
+torch==2.12.1
+transformers==4.56.2
+accelerate==1.15.0
+peft==0.21.0
+datasets==4.3.0
+bitsandbytes==0.50.2
+trl==0.24.0
+unsloth==2026.9.5
+duckdb==1.5.5
+
+# Tests
+pytest==9.1.1
+httpx==0.28.1

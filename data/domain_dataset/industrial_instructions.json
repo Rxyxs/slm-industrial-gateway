@@ -1,0 +1,247 @@
+[
+  {
+    "messages": [
+      {"role": "system", "content": "Eres un asistente experto en telemetría industrial y sensórica para operaciones mineras."},
+      {"role": "user", "content": "¿Qué indica un aumento sostenido en la vibración RMS de un rodamiento de motor eléctrico en un chancador primario?"},
+      {"role": "assistant", "content": "Un aumento sostenido en la vibración RMS suele indicar desgaste progresivo del rodamiento, desalineación del eje o desbalanceo mecánico. En chancadores primarios, valores por sobre 4.5 mm/s RMS (ISO 10816) ameritan un análisis espectral para identificar frecuencias características de falla (BPFO, BPFI, FTF) antes de que escale a una falla catastrófica."}
+    ]
+  },
+  {
+    "messages": [
+      {"role": "system", "content": "Eres un asistente experto en telemetría industrial y sensórica para operaciones mineras."},
+      {"role": "user", "content": "Explica qué es un weightometer y para qué se usa en una correa transportadora de mineral."},
+      {"role": "assistant", "content": "Un weightometer, o balanza de correa, es un sensor de pesaje continuo instalado sobre los rodillos de una correa transportadora que mide en tiempo real el tonelaje de mineral transportado, combinando la señal de una celda de carga con la velocidad de la correa (tacómetro). Se usa para control metalúrgico, balance de masa de planta y reconciliación de producción."}
+    ]
+  },
+  {
+    "messages": [
+      {"role": "system", "content": "Eres un asistente experto en telemetría industrial y sensórica para operaciones mineras."},
+      {"role": "user", "content": "Un sensor de presión 4-20 mA en el circuito hidráulico de un molino SAG entrega una lectura fija de 4 mA sin variación. ¿Qué diagnóstico inicial harías?"},
+      {"role": "assistant", "content": "Una señal fija en 4 mA (el límite inferior del rango) sin variación sugiere que el sensor está reportando el valor mínimo de escala, lo cual puede deberse a: cable roto o desconectado, falla del transmisor, pérdida de presión real en el circuito, o un lazo de corriente abierto. Se debe verificar continuidad del lazo, alimentación del transmisor de 24 VDC y compararlo con una lectura de referencia manométrica local antes de descartar el sensor."}
+    ]
+  },
+  {
+    "messages": [
+      {"role": "system", "content": "Eres un asistente experto en telemetría industrial y sensórica para operaciones mineras."},
+      {"role": "user", "content": "¿Qué diferencia hay entre un PLC, un SCADA y un DCS en el contexto de una planta concentradora?"},
+      {"role": "assistant", "content": "El PLC (Controlador Lógico Programable) ejecuta la lógica de control local en tiempo real sobre equipos individuales. El SCADA (Supervisión, Control y Adquisición de Datos) centraliza la visualización, alarmas e históricos de múltiples PLCs para el operador. El DCS (Sistema de Control Distribuido) integra control y supervisión de forma distribuida y redundante, típico en procesos continuos críticos como circuitos de flotación o hidrometalurgia, con mayor tolerancia a fallas que un SCADA convencional sobre PLCs."}
+    ]
+  },
+  {
+    "messages": [
+      {"role": "system", "content": "Eres un asistente experto en telemetría industrial y sensórica para operaciones mineras."},
+      {"role": "user", "content": "¿Cómo se detecta cavitación en una bomba de pulpa usando telemetría de vibración y presión?"},
+      {"role": "assistant", "content": "La cavitación se manifiesta como ruido de alta frecuencia de banda ancha en el espectro de vibración (típicamente entre 1-20 kHz) superpuesto a la firma normal de la bomba, junto con fluctuaciones erráticas en la presión de descarga y caídas intermitentes de la presión de succión por debajo del NPSH requerido. La combinación de un acelerómetro en la carcasa y un transmisor de presión diferencial permite confirmar el fenómeno y diferenciarlo de un desgaste de impulsor."}
+    ]
+  },
+  {
+    "messages": [
+      {"role": "system", "content": "Eres un asistente experto en telemetría industrial y sensórica para operaciones mineras."},
+      {"role": "user", "content": "Define qué mide un piezómetro instalado en un muro de un depósito de relaves."},
+      {"role": "assistant", "content": "Un piezómetro mide la presión de poros del agua dentro del cuerpo del muro o la fundación del depósito de relaves. Esta lectura, generalmente en kPa o metros de columna de agua, permite calcular la línea de saturación freática y evaluar la estabilidad geotécnica de la estructura, siendo un parámetro crítico de monitoreo continuo bajo normativas de seguridad de depósitos de relaves."}
+    ]
+  },
+  {
+    "messages": [
+      {"role": "system", "content": "Eres un asistente experto en telemetría industrial y sensórica para operaciones mineras."},
+      {"role": "user", "content": "¿Qué protocolo de comunicación usarías para integrar transmisores HART a un sistema de control existente y por qué?"},
+      {"role": "assistant", "content": "Se puede usar un multiplexor HART sobre el mismo cableado 4-20 mA, aprovechando la señal digital superpuesta a la analógica para leer variables secundarias (diagnóstico, temperatura interna del sensor, estado de calibración) sin perder la señal analógica principal que sigue llegando al PLC/DCS. Esto permite mantenimiento predictivo del instrumento sin duplicar cableado de campo."}
+    ]
+  },
+  {
+    "messages": [
+      {"role": "system", "content": "Eres un asistente experto en telemetría industrial y sensórica para operaciones mineras."},
+      {"role": "user", "content": "¿Por qué es importante monitorear la densidad de pulpa en la descarga de un espesador (thickener)?"},
+      {"role": "assistant", "content": "La densidad de pulpa en la descarga, medida usualmente con un densímetro nuclear o de presión diferencial, indica la eficiencia de sedimentación y compactación del espesador. Una densidad por debajo del set point sugiere baja recuperación de agua y riesgo de sobrecarga en etapas posteriores, mientras que una densidad excesiva puede generar torque elevado en el rastrillo (rake) y activar la alarma de alto torque, riesgo de atascamiento del mecanismo."}
+    ]
+  },
+  {
+    "messages": [
+      {"role": "system", "content": "Eres un asistente experto en telemetría industrial y sensórica para operaciones mineras."},
+      {"role": "user", "content": "Un sensor de nivel por ultrasonido en un estanque de agua de proceso muestra lecturas erráticas cuando hay espuma en la superficie. ¿Qué alternativa de sensor recomendarías?"},
+      {"role": "assistant", "content": "Ante presencia de espuma, un sensor de nivel por radar de onda guiada (GWR) o un transmisor de presión hidrostática sumergible son más robustos, ya que no dependen del reflejo de una superficie limpia como el ultrasonido. El radar de onda guiada además tolera vapor y turbulencia mejor que el ultrasonido convencional."}
+    ]
+  },
+  {
+    "messages": [
+      {"role": "system", "content": "Eres un asistente experto en telemetría industrial y sensórica para operaciones mineras."},
+      {"role": "user", "content": "¿Qué significa que un sensor de gas CH4 en una mina subterránea entre en 'stuck-at value' y cómo se detecta desde el sistema de monitoreo?"},
+      {"role": "assistant", "content": "'Stuck-at value' significa que el sensor reporta un valor congelado que no responde a cambios reales en la concentración de gas, generalmente por saturación del elemento sensor, falla electrónica o suciedad. Se detecta configurando una alarma de varianza cero: si la señal no cambia en más de una ventana de tiempo definida (por ejemplo, 15 minutos) pese a variabilidad esperada en el ambiente, el sistema marca el sensor como sospechoso y solicita verificación en terreno."}
+    ]
+  },
+  {
+    "messages": [
+      {"role": "system", "content": "Eres un asistente experto en telemetría industrial y sensórica para operaciones mineras."},
+      {"role": "user", "content": "Explica el concepto de 'votación 2 de 3' (2oo3) en sensores redundantes de temperatura de un secador de concentrado."},
+      {"role": "assistant", "content": "La votación 2 de 3 (2oo3) es una arquitectura de redundancia donde se instalan tres sensores midiendo la misma variable y la lógica de control solo actúa (por ejemplo, disparo de una protección) si al menos dos de los tres coinciden en indicar una condición anómala. Esto reduce falsos disparos por falla de un único sensor sin sacrificar la capacidad de detectar una condición real de sobretemperatura."}
+    ]
+  },
+  {
+    "messages": [
+      {"role": "system", "content": "Eres un asistente experto en telemetría industrial y sensórica para operaciones mineras."},
+      {"role": "user", "content": "¿Qué información aporta el análisis de aceite lubricante combinado con sensores de temperatura en la caja reductora de un molino de bolas?"},
+      {"role": "assistant", "content": "El análisis de aceite (contenido de partículas metálicas, viscosidad, contaminación por agua) detecta desgaste interno de engranajes y rodamientos antes de que se manifieste térmicamente. Combinado con sensores de temperatura en carcasa y rodamientos, permite correlacionar tendencias: un aumento de temperatura sin cambios en el aceite sugiere problema de refrigeración, mientras que partículas metálicas crecientes con temperatura estable indican desgaste mecánico incipiente."}
+    ]
+  },
+  {
+    "messages": [
+      {"role": "system", "content": "Eres un asistente experto en telemetría industrial y sensórica para operaciones mineras."},
+      {"role": "user", "content": "¿Cómo se calibra en terreno un transmisor de presión diferencial usado para medir flujo en una línea de pulpa mediante placa orificio?"},
+      {"role": "assistant", "content": "Se aísla el transmisor con las válvulas de bloqueo, se iguala presión con la válvula de by-pass, se desconecta de la línea de proceso y se aplica una fuente de calibración de presión certificada en al menos 5 puntos (0%, 25%, 50%, 75%, 100% del rango), comparando la salida en mA contra el patrón. Las desviaciones se ajustan en el transmisor y se documentan en el certificado de calibración conforme al plan de metrología de la planta."}
+    ]
+  },
+  {
+    "messages": [
+      {"role": "system", "content": "Eres un asistente experto en telemetría industrial y sensórica para operaciones mineras."},
+      {"role": "user", "content": "¿Qué es el 'stripping ratio' y cómo se relaciona con los sensores de carga útil (payload) de los camiones mineros?"},
+      {"role": "assistant", "content": "El stripping ratio es la relación entre toneladas de material estéril removido y toneladas de mineral extraído. Los sensores de carga útil (payload meters), basados en presión de suspensión hidráulica o galgas extensométricas en el chasis, registran cada viaje clasificado como estéril o mineral, permitiendo calcular el stripping ratio real de la operación en tiempo casi real y compararlo con el plan minero."}
+    ]
+  },
+  {
+    "messages": [
+      {"role": "system", "content": "Eres un asistente experto en telemetría industrial y sensórica para operaciones mineras."},
+      {"role": "user", "content": "Un analizador en línea de ley de cobre por fluorescencia de rayos X (XRF) en la correa de alimentación muestra una desviación de 0.3% respecto al muestreo manual. ¿Es aceptable?"},
+      {"role": "assistant", "content": "Depende de la tolerancia metalúrgica definida, pero típicamente una desviación de 0.3% en ley de cobre está dentro del rango aceptable para analizadores en línea XRF (usualmente ±0.1-0.5% según especificación del fabricante y homogeneidad del mineral). Se recomienda verificar la tendencia en el tiempo: una desviación sistemática y creciente amerita recalibración con estándares certificados, mientras que una dispersión aleatoria dentro de rango es esperable por heterogeneidad de la muestra."}
+    ]
+  },
+  {
+    "messages": [
+      {"role": "system", "content": "Eres un asistente experto en telemetría industrial y sensórica para operaciones mineras."},
+      {"role": "user", "content": "¿Qué rol juega un encoder incremental en el control de velocidad de un correa transportadora principal (overland conveyor)?"},
+      {"role": "assistant", "content": "El encoder incremental, acoplado al eje del tambor motriz o a un rodillo tensor, genera pulsos proporcionales a la rotación que el variador de frecuencia (VFD) usa para calcular la velocidad real de la correa en lazo cerrado. Esto permite mantener la velocidad de referencia bajo variaciones de carga, detectar deslizamiento de correa (slip) comparando velocidad de motor versus velocidad de correa, y activar paradas de emergencia por sobrevelocidad o velocidad cero con correa energizada."}
+    ]
+  },
+  {
+    "messages": [
+      {"role": "system", "content": "Eres un asistente experto en telemetría industrial y sensórica para operaciones mineras."},
+      {"role": "user", "content": "¿Cómo se configura una banda muerta (deadband) en una alarma SCADA y por qué es necesaria en una variable de nivel de estanque?"},
+      {"role": "assistant", "content": "La banda muerta define un margen alrededor del punto de disparo dentro del cual la alarma no vuelve a evaluarse hasta que la variable salga completamente de esa zona. Para un nivel de estanque que fluctúa cerca del umbral de alarma alta (por ejemplo 85% ± 2%), sin banda muerta el sistema generaría activaciones y desactivaciones repetidas ('chattering'), saturando el historial de eventos y a los operadores. Se configura típicamente entre 2-5% del rango de la variable según su ruido natural."}
+    ]
+  },
+  {
+    "messages": [
+      {"role": "system", "content": "Eres un asistente experto en telemetría industrial y sensórica para operaciones mineras."},
+      {"role": "user", "content": "Explica qué mide un transductor de torque en el eje de un espesador de alta capacidad y qué acción dispara una alarma de alto torque."},
+      {"role": "assistant", "content": "El transductor de torque mide la resistencia mecánica que ofrece la cama de sólidos al giro del rastrillo del espesador, generalmente como porcentaje del torque máximo de diseño. Una alarma de alto torque (por ejemplo sobre 80%) típicamente dispara la elevación automática del rastrillo (rake raising) y/o el aumento de dilución con agua de proceso para reducir la densidad de la cama y evitar el atascamiento mecánico del mecanismo de accionamiento."}
+    ]
+  },
+  {
+    "messages": [
+      {"role": "system", "content": "Eres un asistente experto en telemetría industrial y sensórica para operaciones mineras."},
+      {"role": "user", "content": "¿Qué información entrega un sensor de nivel de espuma (froth level) en una celda de flotación y cómo se controla?"},
+      {"role": "assistant", "content": "El sensor de nivel de espuma, comúnmente por ultrasonido o por medición de conductividad/capacitancia, mide la altura de la interfase entre la pulpa y la capa de espuma mineralizada. Esta señal alimenta un lazo de control PID que actúa sobre la válvula de descarga de relave (dart valve) para mantener el nivel de espuma en el set point óptimo, balanceando recuperación metalúrgica y ley del concentrado."}
+    ]
+  },
+  {
+    "messages": [
+      {"role": "system", "content": "Eres un asistente experto en telemetría industrial y sensórica para operaciones mineras."},
+      {"role": "user", "content": "¿Qué es el 'mill charge' en un molino SAG y cómo se estima usando sensores de presión de descanso (bearing pressure)?"},
+      {"role": "assistant", "content": "El 'mill charge' es el volumen total de carga dentro del molino, compuesto por mineral, agua y medios de molienda (bolas). Se estima indirectamente midiendo la presión hidrostática en los descansos (bearing pressure) del molino: a mayor masa dentro del tambor, mayor presión soportada por los descansos hidrodinámicos. Esta señal, junto con la potencia consumida por el motor, permite inferir el porcentaje de llenado sin necesidad de detener el equipo."}
+    ]
+  },
+  {
+    "messages": [
+      {"role": "system", "content": "Eres un asistente experto en telemetría industrial y sensórica para operaciones mineras."},
+      {"role": "user", "content": "¿Qué diferencia hay entre un sensor de proximidad inductivo y uno capacitivo para detectar la posición de una compuerta en un chute de traspaso?"},
+      {"role": "assistant", "content": "El sensor inductivo detecta objetos metálicos mediante un campo electromagnético y es ideal para detectar la posición de partes metálicas de la compuerta con alta repetibilidad y resistencia a polvo. El sensor capacitivo detecta cualquier material (metálico o no) por cambios en el campo eléctrico, siendo más versátil pero más sensible a acumulación de material fino húmedo, lo cual puede generar falsas detecciones en un chute con alta generación de polvo y humedad."}
+    ]
+  },
+  {
+    "messages": [
+      {"role": "system", "content": "Eres un asistente experto en telemetría industrial y sensórica para operaciones mineras."},
+      {"role": "user", "content": "¿Cómo interpretarías una tendencia de aumento gradual en la corriente del motor de un chancador secundario sin cambio en el tonelaje alimentado?"},
+      {"role": "assistant", "content": "Un aumento gradual de corriente sin aumento de tonelaje sugiere mayor resistencia mecánica al chancado, lo cual puede originarse por desgaste de revestimientos (liners) que reduce la eficiencia de reducción de tamaño, cambio en la dureza del mineral alimentado, o un ajuste de abertura (closed side setting) que se ha cerrado por desgaste. Se recomienda cruzar esta señal con el sensor de posición del CSS y el análisis granulométrico del producto."}
+    ]
+  },
+  {
+    "messages": [
+      {"role": "system", "content": "Eres un asistente experto en telemetría industrial y sensórica para operaciones mineras."},
+      {"role": "user", "content": "¿Qué es un tag OPC-UA y cómo se relaciona con la arquitectura de un historiador de datos de planta?"},
+      {"role": "assistant", "content": "Un tag OPC-UA es un punto de datos identificado de forma única dentro del servidor OPC-UA, que expone en tiempo real el valor, calidad y timestamp de una variable de proceso (por ejemplo, la presión de un sensor específico). El historiador de datos se suscribe a estos tags a través de un cliente OPC-UA para almacenar su evolución temporal, permitiendo análisis histórico, generación de reportes y modelos de mantenimiento predictivo sin sobrecargar directamente al PLC de origen."}
+    ]
+  },
+  {
+    "messages": [
+      {"role": "system", "content": "Eres un asistente experto en telemetría industrial y sensórica para operaciones mineras."},
+      {"role": "user", "content": "¿Qué precauciones se deben tomar al instalar un sensor de temperatura tipo termocupla en un horno de tostación comparado con una Pt100?"},
+      {"role": "assistant", "content": "La termocupla (tipo K o tipo N según el rango) es preferible en hornos de tostación por su capacidad de medir temperaturas superiores a 1000°C, mientras que la Pt100 está limitada a rangos más bajos (típicamente hasta 600-850°C) y es más precisa en ese rango. Además, la termocupla requiere cable de compensación adecuado hasta el transmisor para evitar errores por efecto Seebeck en las uniones, y su vaina protectora debe resistir la atmósfera corrosiva y las altas temperaturas del proceso."}
+    ]
+  },
+  {
+    "messages": [
+      {"role": "system", "content": "Eres un asistente experto en telemetría industrial y sensórica para operaciones mineras."},
+      {"role": "user", "content": "¿Cómo se detecta el desalineamiento de un acoplamiento entre motor y bomba usando análisis de vibración?"},
+      {"role": "assistant", "content": "El desalineamiento se identifica en el espectro de vibración por la presencia dominante del segundo armónico (2X la velocidad de giro) junto con vibración axial elevada, a diferencia del desbalanceo que predomina en 1X radial. Un análisis de fase entre ambos extremos del acoplamiento y la comparación de amplitudes axiales versus radiales confirman el diagnóstico antes de proceder a una alineación láser correctiva."}
+    ]
+  },
+  {
+    "messages": [
+      {"role": "system", "content": "Eres un asistente experto en telemetría industrial y sensórica para operaciones mineras."},
+      {"role": "user", "content": "Explica el propósito de un analizador de partículas en línea (PSI) para medir la granulometría del producto de un circuito de molienda-clasificación."},
+      {"role": "assistant", "content": "El analizador de partículas en línea (Particle Size Analyzer) mide de forma continua la distribución granulométrica de la pulpa, típicamente reportando el porcentaje bajo una malla de referencia (por ejemplo, %-200 mallas). Esta señal alimenta el lazo de control del hidrociclón (presión de alimentación, densidad o apertura de vórtex) para mantener el tamaño de corte deseado sin depender exclusivamente de muestreos manuales periódicos."}
+    ]
+  },
+  {
+    "messages": [
+      {"role": "system", "content": "Eres un asistente experto en telemetría industrial y sensórica para operaciones mineras."},
+      {"role": "user", "content": "¿Qué significa que un lazo de control PID de flujo de reactivo colector en flotación esté 'saturado' y qué riesgo operacional implica?"},
+      {"role": "assistant", "content": "Un lazo saturado significa que la salida del controlador PID alcanzó su límite (0% o 100% de apertura de válvula) y no puede corregir más el error, aunque la variable de proceso siga desviada del set point. En dosificación de colector, esto implica que la planta no puede alcanzar la dosis requerida (riesgo de baja recuperación) o que ya se alcanzó el máximo posible de bomba/válvula, señal de que se debe revisar el dimensionamiento del equipo dosificador o el rango del transmisor de flujo."}
+    ]
+  },
+  {
+    "messages": [
+      {"role": "system", "content": "Eres un asistente experto en telemetría industrial y sensórica para operaciones mineras."},
+      {"role": "user", "content": "¿Qué ventaja tiene un sensor de nivel radar sin contacto frente a uno capacitivo en un silo de mineral fino?"},
+      {"role": "assistant", "content": "El radar sin contacto no se desgasta ni se contamina con el material, ya que mide por tiempo de vuelo de la onda electromagnética reflejada, siendo insensible a la conductividad, humedad o adherencia del mineral fino sobre el sensor. El sensor capacitivo, en cambio, puede generar lecturas erróneas por acumulación de material en su superficie o cambios en la constante dieléctrica del producto almacenado."}
+    ]
+  },
+  {
+    "messages": [
+      {"role": "system", "content": "Eres un asistente experto en telemetría industrial y sensórica para operaciones mineras."},
+      {"role": "user", "content": "¿Cómo se valida la calidad del dato de un sensor antes de usarlo en un modelo de mantenimiento predictivo?"},
+      {"role": "assistant", "content": "Se valida verificando: rango físico plausible (fuera de rango se descarta o marca), tasa de cambio máxima esperada (rate-of-change check) para detectar saltos imposibles, detección de valores congelados (stuck-at) por varianza nula en ventanas de tiempo, calidad de comunicación reportada por el propio protocolo (por ejemplo, calidad OPC 'Good'/'Bad'), y comparación cruzada con sensores redundantes o correlacionados del mismo sistema antes de alimentar el dato al modelo predictivo."}
+    ]
+  },
+  {
+    "messages": [
+      {"role": "system", "content": "Eres un asistente experto en telemetría industrial y sensórica para operaciones mineras."},
+      {"role": "user", "content": "¿Qué es el 'set point' de apertura de vórtex en un hidrociclón y cómo afecta a la eficiencia de clasificación?"},
+      {"role": "assistant", "content": "El vórtex finder es el tubo interno por donde sale el overflow (fracción fina) del hidrociclón. Su diámetro efectivo, cuando es ajustable, define junto con la presión de alimentación el tamaño de corte (D50) de la clasificación. Un vórtex más abierto reduce el tiempo de residencia y puede aumentar el arrastre de partículas gruesas al overflow, mientras que uno más cerrado favorece un corte más fino pero puede reducir la capacidad de tratamiento del equipo."}
+    ]
+  },
+  {
+    "messages": [
+      {"role": "system", "content": "Eres un asistente experto en telemetría industrial y sensórica para operaciones mineras."},
+      {"role": "user", "content": "¿Cómo se implementa una lógica de enclavamiento (interlock) de seguridad usando sensores de posición en una correa transportadora con pull-cord?"},
+      {"role": "assistant", "content": "El interlock se implementa cableando los interruptores de cordón de tironeo (pull-cord switches) distribuidos a lo largo de la correa en serie dentro de un circuito de seguridad categoría 3 o superior, de modo que activar cualquiera de ellos abre el circuito y detiene el motor de forma inmediata e independiente del PLC de proceso. El sistema de seguridad (relé de seguridad o PLC de seguridad certificado) requiere rearme manual local en el punto activado antes de permitir el reinicio, evitando arranques accidentales."}
+    ]
+  },
+  {
+    "messages": [
+      {"role": "system", "content": "Eres un asistente experto en telemetría industrial y sensórica para operaciones mineras."},
+      {"role": "user", "content": "¿Qué información complementaria aporta un sensor de humedad en línea sobre el mineral de alimentación a un secador?"},
+      {"role": "assistant", "content": "El sensor de humedad en línea, típicamente por microondas o infrarrojo cercano (NIR), permite ajustar de forma anticipada la temperatura y el tiempo de residencia del secador según la humedad real de entrada, en lugar de depender de valores promedio o muestreos discontinuos. Esto reduce el consumo energético al evitar sobre-secado y previene productos con humedad residual fuera de especificación por sub-secado."}
+    ]
+  },
+  {
+    "messages": [
+      {"role": "system", "content": "Eres un asistente experto en telemetría industrial y sensórica para operaciones mineras."},
+      {"role": "user", "content": "¿Qué es el análisis de envolvente (envelope analysis) en vibración y por qué se usa para detectar fallas incipientes en rodamientos?"},
+      {"role": "assistant", "content": "El análisis de envolvente demodula las señales de vibración de alta frecuencia generadas por impactos repetitivos (defectos en pistas o elementos rodantes) que quedan enmascaradas dentro del ruido de fondo de baja frecuencia del espectro normal. Al extraer la envolvente de la señal filtrada en banda alta, se revelan las frecuencias características de falla (BPFO, BPFI, BSF) mucho antes de que sean visibles en el espectro de vibración convencional, permitiendo detección temprana."}
+    ]
+  },
+  {
+    "messages": [
+      {"role": "system", "content": "Eres un asistente experto en telemetría industrial y sensórica para operaciones mineras."},
+      {"role": "user", "content": "¿Cómo se diferencia una alarma de proceso de una alarma de diagnóstico de instrumento en un sistema SCADA moderno?"},
+      {"role": "assistant", "content": "La alarma de proceso indica que una variable física (nivel, presión, temperatura) salió de su rango operacional seguro y requiere acción del operador sobre el proceso. La alarma de diagnóstico de instrumento, en cambio, indica una condición del propio sensor o transmisor (falla de comunicación, fuera de calibración, memoria interna corrupta, pérdida de alimentación) que compromete la confiabilidad de la medición, y requiere intervención de mantenimiento de instrumentación en lugar de una acción operacional directa sobre el proceso."}
+    ]
+  },
+  {
+    "messages": [
+      {"role": "system", "content": "Eres un asistente experto en telemetría industrial y sensórica para operaciones mineras."},
+      {"role": "user", "content": "¿Qué rol cumple un transmisor de pH en el circuito de espesamiento de relaves antes de su depósito final?"},
+      {"role": "assistant", "content": "El transmisor de pH monitorea la condición química de la pulpa de relaves para asegurar que se encuentre dentro del rango requerido (típicamente entre 7 y 10, según normativa ambiental y diseño del depósito) antes de su descarga final. Desviaciones de pH pueden indicar dosificación incorrecta de cal u otros reactivos de neutralización aguas arriba, y su monitoreo continuo es parte de los requisitos de cumplimiento ambiental del depósito."}
+    ]
+  }
+]

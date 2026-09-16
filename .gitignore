@@ -1,0 +1,33 @@
+# Entornos virtuales
+.venv/
+venv/
+env/
+
+# Bytecode y cachés de Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Empaquetado
+build/
+dist/
+
+# Configuración local / secretos
+.env
+.env.*
+!.env.example
+
+# Modelos y datasets pesados (se montan como volumen en producción)
+data/models/
+*.gguf
+
+# Editor / SO
+.vscode/
+.idea/
+Thumbs.db
+.DS_Store
