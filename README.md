@@ -43,6 +43,21 @@ tres módulos de runtime (`engine`, `tools`, `guardrails`); `src/evaluation` y
 
 ### Flujo de datos de `/v1/chat/completions`
 
+```mermaid
+flowchart LR
+    Client(["Cliente industrial"]) --> Gateway["FastAPI Gateway<br/>/v1/chat/completions"]
+    Gateway --> InGuard{"Input Guardrail<br/>validación Pydantic"}
+    InGuard -- invalido --> Err400a["HTTP 400"]
+    InGuard -- valido --> Engine1["LLM Engine<br/>GGUF, air-gapped"]
+    Engine1 -- texto en lenguaje natural --> OutGuard
+    Engine1 -- tool call JSON --> Tools{"Tool Execution<br/>DuckDB / Z-score / RUL"}
+    Tools -- SQL peligroso o tool invalida --> Err400b["HTTP 400"]
+    Tools -- resultado OK --> Engine2["LLM Engine<br/>segunda pasada"]
+    Engine2 --> OutGuard{"Output Guardrail<br/>respuesta no vacia"}
+    OutGuard -- vacio/invalido --> Err500["HTTP 500"]
+    OutGuard -- valido --> Response(["Respuesta HTTP<br/>contrato OpenAI"])
+```
+
 1. **Validación de entrada**: Pydantic valida el payload (`ChatCompletionRequest`);
    se rechaza con `400` si `messages` está vacío o no cumple el esquema.
 2. **Inferencia SLM**: se construye un prompt que incluye el listado de tools
@@ -70,6 +85,45 @@ tres módulos de runtime (`engine`, `tools`, `guardrails`); `src/evaluation` y
 Todas las tools están protegidas por guardrails; ninguna tool ejecuta SQL de
 escritura ni comandos del sistema.
 
+## Benchmarks
+
+> **Los números de esta sección son ilustrativos, no una medición real.** Este
+> repositorio no tiene GPU ni un modelo GGUF cargado, así que todavía no hay
+> una corrida real de `src/engine/benchmarks.run_benchmark` sobre FP16/Q8_0/
+> Q4_K_M, ni una corrida real de `src/evaluation.FaithfulnessEvaluator` contra
+> el agente. Los valores existen para dejar lista la infraestructura de
+> reporte (`scripts/generate_plots.py`); hay que reemplazarlos por resultados
+> reales antes de citarlos como medición de rendimiento.
+
+![Quantization Benchmark](outputs/reports/quant_benchmark.png)
+
+| Cuantización | VRAM aprox. (7B) | TTFT (ms) | Throughput (tok/s) |
+|--------------|-----------------:|----------:|--------------------:|
+| FP16         | ~14 GB           | 180       | 22                   |
+| Q8_0         | ~7.5 GB          | 95        | 38                   |
+| Q4_K_M       | ~4.5 GB          | 60        | 54                   |
+
+*VRAM aproximada para un modelo de 7B según el tamaño de archivo GGUF típico
+de cada cuantización; TTFT y throughput son los mismos valores ilustrativos
+del gráfico. Medir con `scripts/quantize.py --load` + `run_benchmark` sobre
+el hardware real de destino.*
+
+![Eval Metrics](outputs/reports/eval_metrics.png)
+
+| Métrica            | Valor | Qué mide |
+|---------------------|------:|----------|
+| Faithfulness         | 0.93  | El `FaithfulnessMetric` de DeepEval: cuánto de la respuesta está sustentado por el contexto recuperado. |
+| Answer Relevancy     | 0.89  | Qué tan pertinente es la respuesta final respecto a la pregunta del usuario. |
+| SQL Safety Rate      | 1.00  | Fracción de intentos de `query_duckdb` con SQL peligroso correctamente bloqueados por `validate_sql_query`. |
+| JSON Validity        | 0.97  | Fracción de tool calls emitidas por el SLM que parsean como `ToolCallEnvelope` sin error de esquema. |
+
+Para regenerar ambos gráficos (con los mismos placeholders u otros datos ya
+editados en el script):
+
+```bash
+python scripts/generate_plots.py
+```
+
 ## Estructura del repositorio
 
 ```
@@ -85,7 +139,10 @@ data/
   domain_dataset/  Dataset sintético ChatML de dominio (telemetría/sensores)
   models/          Pesos GGUF locales (no versionado; ver instalación)
 scripts/
-  quantize.py   Verifica/carga modelos GGUF cuantizados (Q4_K_M, Q8_0)
+  quantize.py       Verifica/carga modelos GGUF cuantizados (Q4_K_M, Q8_0)
+  generate_plots.py Genera los gráficos de `outputs/reports/` (ver Benchmarks)
+outputs/
+  reports/        Gráficos versionados que embeben el README (PNG)
 monitoring/
   prometheus.yml  Configuración de scraping para el contenedor Prometheus
 tests/
@@ -93,7 +150,7 @@ tests/
   test_eval.py, test_training.py, test_integration.py
 ```
 
-## Instalación local aislada (air-gapped)
+## Guía de despliegue air-gapped
 
 El servicio de inferencia (`src/engine` + `src/api`) no requiere red en
 tiempo de ejecución: el modelo GGUF es un archivo local y llama.cpp corre
@@ -102,46 +159,82 @@ instalación de dependencias Python y (b) el módulo de evaluación si se deja
 apuntando a un juez alojado en la nube. Para un entorno sin salida a
 Internet:
 
-1. **Preparar un wheelhouse en una máquina con red** (misma versión de
-   Python/plataforma que el destino):
+### 1. Dependencias Python (wheelhouse)
 
-   ```bash
-   pip download -r requirements.txt -d wheelhouse/
-   ```
+En una máquina con red (misma versión de Python/plataforma que el destino):
 
-   Copiar `wheelhouse/` y `requirements.txt` al entorno aislado.
+```bash
+pip download -r requirements.txt -d wheelhouse/
+```
 
-2. **Instalar sin acceso a PyPI** en el destino:
+Copiar `wheelhouse/` y `requirements.txt` al entorno aislado, e instalar ahí
+sin acceso a PyPI:
 
-   ```bash
-   pip install --no-index --find-links=wheelhouse/ -r requirements.txt
-   ```
+```bash
+pip install --no-index --find-links=wheelhouse/ -r requirements.txt
+```
 
-3. **Pre-cargar la imagen base de Docker** (en la máquina con red):
+### 2. Montaje local de los pesos GGUF
 
-   ```bash
-   docker pull python:3.11-slim
-   docker pull prom/prometheus:v3.0.1
-   docker save python:3.11-slim prom/prometheus:v3.0.1 -o base-images.tar
-   ```
+El modelo nunca se descarga en tiempo de ejecución: `MODEL_PATH` apunta a un
+archivo `.gguf` que ya tiene que estar en disco.
 
-   En el destino: `docker load -i base-images.tar`, luego
-   `docker compose build` (usa solo el wheelhouse local, sin red).
-
-4. **Copiar el modelo GGUF** a `data/models/model.gguf` (o la ruta que indique
-   `MODEL_PATH`). Verificarlo con:
+1. Copiar el archivo a `data/models/model.gguf` (o la ruta que indique
+   `MODEL_PATH`); en Docker Compose esa carpeta se monta como volumen
+   de solo lectura (`./data/models:/app/data/models:ro`), así que el `.gguf`
+   nunca se copia dentro de la imagen ni queda expuesto por accidente.
+2. Verificar el archivo (cabecera GGUF válida y cuantización detectada) y
+   opcionalmente cargarlo en memoria para confirmar que arranca:
 
    ```bash
    python scripts/quantize.py data/models/model.gguf --load
    ```
 
-5. **Evaluación offline sin salida a Internet**: `src/evaluation` usa DeepEval
-   con un modelo juez configurable (`FaithfulnessEvaluator(judge_model=...)`).
-   Por defecto apunta a `gpt-4o-mini` (API externa). En un entorno aislado,
-   apuntar `OPENAI_BASE_URL`/`OPENAI_API_KEY` a un endpoint OpenAI-compatible
-   servido localmente (por ejemplo, este mismo gateway u otro servidor local),
-   o simplemente omitir la ejecución de `tests/test_eval.py` en producción:
-   en CI corre con las métricas de DeepEval mockeadas, sin red.
+### 3. Arranque offline vía Docker Compose
+
+En la máquina con red, pre-cargar las imágenes base (no hay Dockerfile para
+Prometheus: se usa la imagen oficial tal cual):
+
+```bash
+docker pull python:3.11-slim
+docker pull prom/prometheus:v3.0.1
+docker save python:3.11-slim prom/prometheus:v3.0.1 -o base-images.tar
+```
+
+En el destino aislado:
+
+```bash
+docker load -i base-images.tar
+docker compose build   # usa solo wheelhouse/ y las imagenes ya cargadas, sin red
+docker compose up -d
+```
+
+`docker compose build` no debe disparar ningún acceso a red si el
+`Dockerfile` y `requirements.txt` están fijados a wheels ya presentes en
+`wheelhouse/`; si el build intenta salir a Internet, es señal de una
+dependencia sin pin exacto en `requirements.txt`.
+
+### 4. Configuración de guardrails
+
+Los guardrails (`src/guardrails/validators.py`) son intencionalmente
+**código, no configuración**: la lista de verbos SQL permitidos
+(`ALLOWED_SQL_VERBS`) y de palabras clave bloqueadas (`BLOCKED_SQL_KEYWORDS`)
+son constantes fijas, sin variable de entorno ni flag que las relaje en
+producción. Esto es deliberado en un entorno air-gapped: no hay superficie de
+configuración en runtime que un operador pueda aflojar por error (o que un
+prompt del propio SLM pueda intentar manipular). Para ampliar qué puede hacer
+el agente, la vía soportada es agregar una tool nueva y explícita en
+`src/tools/industrial_tools.py`, no relajar el validador SQL existente.
+
+### 5. Evaluación offline sin salida a Internet
+
+`src/evaluation` usa DeepEval con un modelo juez configurable
+(`FaithfulnessEvaluator(judge_model=...)`). Por defecto apunta a
+`gpt-4o-mini` (API externa). En un entorno aislado, apuntar
+`OPENAI_BASE_URL`/`OPENAI_API_KEY` a un endpoint OpenAI-compatible servido
+localmente (por ejemplo, este mismo gateway u otro servidor local), o
+simplemente omitir la evaluación de fidelidad en producción: en CI,
+`tests/test_eval.py` corre con las métricas de DeepEval mockeadas, sin red.
 
 ## Configuración (variables de entorno)
 

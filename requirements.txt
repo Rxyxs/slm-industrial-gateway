@@ -31,6 +31,10 @@ trl==0.24.0
 unsloth==2026.9.5
 duckdb==1.5.5
 
+# Reportes y benchmarking (scripts/generate_plots.py)
+matplotlib==3.10.9
+seaborn==0.13.2
+
 # Tests
 pytest==9.1.1
 httpx==0.28.1
