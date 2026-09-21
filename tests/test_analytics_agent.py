@@ -1,211 +1,87 @@
-"""Tests del AnalyticsAgent: generación de argumentos para las 3 herramientas
-industriales, y bloqueo de SQL destructivo antes de llegar a DuckDB."""
+"""Tests unitarios del AnalyticsAgent (`src/agents/analytics_agent.py`): despacho
+correcto de las 3 herramientas industriales, y propagación (no absorción) de
+`DangerousSQLError` para SQL destructivo -- la conversión a un error HTTP
+seguro ocurre en `src.api.routes` (ver `tests/test_agents.py`, sección de
+API), no en este agente; acá se verifica que la ejecución se interrumpe de
+inmediato y sin resultado parcial.
+"""
+
+from __future__ import annotations
+
+import json
 
 import pytest
 
-from src.agents.analytics_agent import (
-    ANALYTICS_REQUIRED,
-    AnalyticsAgent,
-    AnalyticsRequest,
-    UnsupportedClassificationError,
-    UnsupportedToolError,
-)
+from src.agents.analytics_agent import AnalyticsAgent, AnalyticsResult
+from src.agents.schemas import AgentMessage, ToolCallEnvelope
 from src.guardrails.validators import DangerousSQLError
-from src.tools.industrial_tools import CalculateRULInput, QueryDuckDBInput, SensorAnomalyCheckInput
+from src.tools import ToolNotFoundError, build_default_registry
 
 
 @pytest.fixture()
 def agent() -> AnalyticsAgent:
-    return AnalyticsAgent()
+    return AnalyticsAgent(build_default_registry())
 
 
 # --------------------------------------------------------------------------- #
-# build_tool_call: generación de argumentos para las 3 herramientas
+# Despacho correcto de las 3 herramientas industriales
 # --------------------------------------------------------------------------- #
 
 
-def test_build_tool_call_query_duckdb(agent):
-    request = AnalyticsRequest(
-        classification=ANALYTICS_REQUIRED,
-        tool_name="query_duckdb",
-        parameters={"query": "SELECT 1 AS one", "limit": 50},
+def test_execute_query_duckdb_returns_tool_message_with_real_result(agent):
+    result = agent.execute(ToolCallEnvelope(tool="query_duckdb", arguments={"query": "SELECT 1 AS one"}))
+
+    assert isinstance(result, AnalyticsResult)
+    assert isinstance(result.message, AgentMessage)
+    assert result.message.role == "tool"
+    assert result.raw_result["rows"] == [[1]]
+    assert json.loads(result.message.content) == result.raw_result
+
+
+def test_execute_sensor_anomaly_check_returns_tool_message_with_real_result(agent):
+    result = agent.execute(
+        ToolCallEnvelope(tool="sensor_anomaly_check", arguments={"readings": [10, 10, 10, 10, 60], "threshold": 2.0})
     )
 
-    payload = agent.build_tool_call(request)
-
-    assert payload.tool_name == "query_duckdb"
-    assert payload.arguments["query"] == "SELECT 1 AS one"
-    assert payload.arguments["limit"] == 50
-    QueryDuckDBInput.model_validate(payload.arguments)  # el payload es válido para la herramienta real
+    assert result.message.role == "tool"
+    assert result.raw_result["is_last_reading_anomalous"] is True
+    assert json.loads(result.message.content) == result.raw_result
 
 
-def test_build_tool_call_sensor_anomaly_check(agent):
-    request = AnalyticsRequest(
-        classification=ANALYTICS_REQUIRED,
-        tool_name="sensor_anomaly_check",
-        parameters={"readings": [10, 10, 10, 10, 60], "threshold": 2.5},
+def test_execute_calculate_rul_returns_tool_message_with_real_result(agent):
+    result = agent.execute(
+        ToolCallEnvelope(
+            tool="calculate_rul",
+            arguments={"timestamps": [0, 1, 2, 3], "measurements": [10, 20, 30, 40], "failure_threshold": 100},
+        )
     )
 
-    payload = agent.build_tool_call(request)
-
-    assert payload.tool_name == "sensor_anomaly_check"
-    assert payload.arguments["readings"] == [10, 10, 10, 10, 60]
-    assert payload.arguments["threshold"] == 2.5
-    SensorAnomalyCheckInput.model_validate(payload.arguments)
-
-
-def test_build_tool_call_calculate_rul(agent):
-    request = AnalyticsRequest(
-        classification=ANALYTICS_REQUIRED,
-        tool_name="calculate_rul",
-        parameters={
-            "timestamps": [0, 1, 2, 3],
-            "measurements": [10, 20, 30, 40],
-            "failure_threshold": 100,
-        },
-    )
-
-    payload = agent.build_tool_call(request)
-
-    assert payload.tool_name == "calculate_rul"
-    assert payload.arguments["failure_threshold"] == 100
-    CalculateRULInput.model_validate(payload.arguments)
-
-
-def test_build_tool_call_rejects_non_analytics_classification(agent):
-    request = AnalyticsRequest(
-        classification="OTHER_INTENT",
-        tool_name="query_duckdb",
-        parameters={"query": "SELECT 1"},
-    )
-
-    with pytest.raises(UnsupportedClassificationError):
-        agent.build_tool_call(request)
-
-
-def test_build_tool_call_rejects_unsupported_tool(agent):
-    request = AnalyticsRequest(
-        classification=ANALYTICS_REQUIRED,
-        tool_name="not_a_real_tool",
-        parameters={},
-    )
-
-    with pytest.raises(UnsupportedToolError):
-        agent.build_tool_call(request)
-
-
-def test_build_tool_call_rejects_invalid_parameters(agent):
-    request = AnalyticsRequest(
-        classification=ANALYTICS_REQUIRED,
-        tool_name="sensor_anomaly_check",
-        parameters={"readings": [1.0]},  # el schema real exige min_length=2
-    )
-
-    with pytest.raises(Exception):
-        agent.build_tool_call(request)
+    assert result.message.role == "tool"
+    assert result.raw_result["rul_estimate"] == pytest.approx(6.0)
+    assert json.loads(result.message.content) == result.raw_result
 
 
 # --------------------------------------------------------------------------- #
-# handle_request: ejecución end-to-end + telemetría
+# SQL destructivo: la ejecución se interrumpe antes de tocar DuckDB
 # --------------------------------------------------------------------------- #
-
-
-def test_handle_request_executes_query_duckdb_successfully(agent):
-    request = AnalyticsRequest(
-        classification=ANALYTICS_REQUIRED,
-        tool_name="query_duckdb",
-        parameters={"query": "SELECT 1 AS one"},
-        request_id="req-1",
-    )
-
-    telemetry = agent.handle_request(request)
-
-    assert telemetry.success is True
-    assert telemetry.error is None
-    assert telemetry.result["rows"] == [[1]]
-    assert telemetry.request_id == "req-1"
-    assert telemetry.latency_ms >= 0
-
-
-def test_handle_request_executes_sensor_anomaly_check_successfully(agent):
-    request = AnalyticsRequest(
-        classification=ANALYTICS_REQUIRED,
-        tool_name="sensor_anomaly_check",
-        parameters={"readings": [10, 10, 10, 10, 60], "threshold": 2.0},
-    )
-
-    telemetry = agent.handle_request(request)
-
-    assert telemetry.success is True
-    assert telemetry.result["is_last_reading_anomalous"] is True
-
-
-def test_handle_request_executes_calculate_rul_successfully(agent):
-    request = AnalyticsRequest(
-        classification=ANALYTICS_REQUIRED,
-        tool_name="calculate_rul",
-        parameters={"timestamps": [0, 1, 2, 3], "measurements": [10, 20, 30, 40], "failure_threshold": 100},
-    )
-
-    telemetry = agent.handle_request(request)
-
-    assert telemetry.success is True
-    assert telemetry.result["rul_estimate"] == pytest.approx(6.0)
 
 
 @pytest.mark.parametrize("dangerous_query", ["DROP TABLE sensors", "DELETE FROM sensors WHERE id = 1"])
-def test_handle_request_blocks_destructive_sql_and_returns_safe_error(agent, dangerous_query):
-    request = AnalyticsRequest(
-        classification=ANALYTICS_REQUIRED,
-        tool_name="query_duckdb",
-        parameters={"query": dangerous_query},
-    )
-
-    telemetry = agent.handle_request(request)
-
-    assert telemetry.success is False
-    assert telemetry.result is None
-    assert telemetry.error is not None
-    assert telemetry.error["type"] == DangerousSQLError.__name__
+def test_execute_interrupts_on_destructive_sql(agent, dangerous_query):
+    with pytest.raises(DangerousSQLError):
+        agent.execute(ToolCallEnvelope(tool="query_duckdb", arguments={"query": dangerous_query}))
 
 
-def test_handle_request_blocks_sql_before_reaching_the_registry(agent, monkeypatch):
-    """No alcanza con que el resultado final sea un error: la interrupción
-    tiene que pasar ANTES de despachar hacia el registro/DuckDB."""
-    calls = []
-    original_dispatch = agent.registry.dispatch
-
-    def spy_dispatch(name, arguments):
-        calls.append((name, arguments))
-        return original_dispatch(name, arguments)
-
-    monkeypatch.setattr(agent.registry, "dispatch", spy_dispatch)
-
-    request = AnalyticsRequest(
-        classification=ANALYTICS_REQUIRED,
-        tool_name="query_duckdb",
-        parameters={"query": "DROP TABLE sensors"},
-    )
-
-    telemetry = agent.handle_request(request)
-
-    assert telemetry.success is False
-    assert calls == []  # el registro nunca llegó a despachar
+def test_execute_raises_before_returning_any_partial_result(agent):
+    """No alcanza con que se lance la excepción: no debe existir un
+    `AnalyticsResult` parcial ni un side-effect de DuckDB asociado."""
+    try:
+        agent.execute(ToolCallEnvelope(tool="query_duckdb", arguments={"query": "DROP TABLE sensors"}))
+        pytest.fail("Se esperaba DangerousSQLError")
+    except DangerousSQLError as exc:
+        assert "DROP" in str(exc)
 
 
-def test_handle_request_never_raises_on_unsupported_tool(agent):
-    request = AnalyticsRequest(classification=ANALYTICS_REQUIRED, tool_name="drop_everything", parameters={})
-
-    telemetry = agent.handle_request(request)
-
-    assert telemetry.success is False
-    assert telemetry.error["type"] == UnsupportedToolError.__name__
-
-
-def test_handle_request_never_raises_on_wrong_classification(agent):
-    request = AnalyticsRequest(classification="OTHER_INTENT", tool_name="query_duckdb", parameters={"query": "SELECT 1"})
-
-    telemetry = agent.handle_request(request)
-
-    assert telemetry.success is False
-    assert telemetry.error["type"] == UnsupportedClassificationError.__name__
+def test_execute_propagates_tool_not_found(agent):
+    with pytest.raises(ToolNotFoundError):
+        agent.execute(ToolCallEnvelope(tool="no_existe", arguments={}))
