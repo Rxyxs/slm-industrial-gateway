@@ -8,8 +8,8 @@ de red para la ruta de inferencia.
 
 ## Arquitectura
 
-El sistema se compone de cinco módulos independientes bajo `src/`, integrados
-por la capa de API:
+El sistema se compone de seis módulos independientes bajo `src/`, integrados
+por la capa de API a través de un pipeline multi-agente:
 
 ```
                         ┌──────────────────────────────┐
@@ -17,18 +17,26 @@ por la capa de API:
                         │  /v1/chat/completions          │
                         │  /v1/models  /health  /metrics │
                         └───────────────┬────────────────┘
-                                        │ orquesta
-        ┌───────────────────┬──────────┼──────────┬───────────────────┐
-        ▼                   ▼                     ▼                   ▼
-┌───────────────┐  ┌─────────────────┐  ┌──────────────────┐  ┌────────────────┐
-│  src/engine    │  │   src/tools      │  │  src/guardrails  │  │ src/evaluation  │
-│  LLMServer     │  │  ToolRegistry +  │  │  validate_sql_   │  │ Faithfulness/   │
-│  (llama.cpp,   │  │  industrial_tools│  │  query,          │  │ Hallucination   │
-│  GGUF, fallback│  │  (DuckDB, Z-score│  │  validate_json_  │  │ (DeepEval, para │
-│  GPU→CPU)      │  │  anomalías, RUL) │  │  output          │  │ evaluación      │
-└───────────────┘  └─────────────────┘  └──────────────────┘  │ offline, no en  │
-                                                                 │ el request path)│
-                                                                 └────────────────┘
+                                        │ delega en
+                        ┌───────────────▼─────────────────┐
+                        │  src/agents (AgentOrchestrator)   │
+                        │  RouterAgent -> AnalyticsAgent     │
+                        │  (si aplica) -> VerifierAgent      │
+                        └────┬──────────────┬──────────┬────┘
+                             ▼               ▼          ▼
+                   ┌───────────────┐ ┌──────────────┐ ┌──────────────────┐
+                   │  src/engine    │ │  src/tools    │ │  src/guardrails  │
+                   │  LLMServer     │ │  ToolRegistry │ │  validate_sql_   │
+                   │  (llama.cpp,   │ │  + industrial │ │  query,          │
+                   │  GGUF, fallback│ │  _tools       │ │  validate_json_  │
+                   │  GPU→CPU)      │ │  (DuckDB,     │ │  output          │
+                   └───────────────┘ │  Z-score, RUL)│ └──────────────────┘
+                                      └──────────────┘
+
+        src/evaluation (offline, no se ejecuta en el request path)
+        FaithfulnessEvaluator (DeepEval, LLM juez externo) para evaluación
+        batch — distinto del chequeo de fidelidad local y sin red que hace
+        VerifierAgent en cada solicitud (ver "Flujo de datos" más abajo).
 
         src/training (offline, no se ejecuta en el gateway)
         QLoRA (Unsloth + TRL SFTTrainer) sobre data/domain_dataset/
@@ -37,9 +45,12 @@ por la capa de API:
 ```
 
 `src/tools` depende de `src/guardrails` (todo query SQL y todo argumento de
-tool pasa por un validador antes de ejecutarse). `src/api` depende de los
-tres módulos de runtime (`engine`, `tools`, `guardrails`); `src/evaluation` y
-`src/training` son pipelines offline, desacoplados del servicio HTTP.
+tool pasa por un validador antes de ejecutarse). `src/agents` depende de los
+tres módulos de runtime (`engine`, `tools`, `guardrails`) y es el único punto
+de entrada que usa `src/api` para procesar una conversación: la API ya no
+arma el prompt ni despacha tools directamente, delega todo el flujo a
+`AgentOrchestrator`. `src/evaluation` y `src/training` son pipelines offline,
+desacoplados del servicio HTTP.
 
 ### Flujo de datos de `/v1/chat/completions`
 
@@ -48,36 +59,56 @@ flowchart LR
     Client(["Cliente industrial"]) --> Gateway["FastAPI Gateway<br/>/v1/chat/completions"]
     Gateway --> InGuard{"Input Guardrail<br/>validación Pydantic"}
     InGuard -- invalido --> Err400a["HTTP 400"]
-    InGuard -- valido --> Engine1["LLM Engine<br/>GGUF, air-gapped"]
-    Engine1 -- texto en lenguaje natural --> OutGuard
-    Engine1 -- tool call JSON --> Tools{"Tool Execution<br/>DuckDB / Z-score / RUL"}
-    Tools -- SQL peligroso o tool invalida --> Err400b["HTTP 400"]
-    Tools -- resultado OK --> Engine2["LLM Engine<br/>segunda pasada"]
-    Engine2 --> OutGuard{"Output Guardrail<br/>respuesta no vacia"}
-    OutGuard -- vacio/invalido --> Err500["HTTP 500"]
-    OutGuard -- valido --> Response(["Respuesta HTTP<br/>contrato OpenAI"])
+    InGuard -- valido --> Router["RouterAgent<br/>LLM Engine, GGUF air-gapped"]
+    Router -- texto en lenguaje natural --> Verifier
+    Router -- tool call JSON --> Analytics["AnalyticsAgent<br/>DuckDB / Z-score / RUL"]
+    Analytics -- SQL peligroso o tool invalida --> Err400b["HTTP 400"]
+    Analytics -- resultado OK --> Router2["RouterAgent<br/>segunda pasada"]
+    Router2 --> Verifier{"VerifierAgent<br/>formato + fidelidad numérica"}
+    Verifier -- vacio/invalido (modelo) --> Err500["HTTP 500"]
+    Verifier -- tool-call sin resolver o<br/>valor no sustentado --> Err400c["HTTP 400"]
+    Verifier -- valido y fiel --> Response(["Respuesta HTTP<br/>contrato OpenAI"])
 ```
 
 1. **Validación de entrada**: Pydantic valida el payload (`ChatCompletionRequest`);
    se rechaza con `400` si `messages` está vacío o no cumple el esquema.
-2. **Inferencia SLM**: se construye un prompt que incluye el listado de tools
+   `src/api` traduce los `ChatMessage` del contrato HTTP a `AgentMessage`
+   internos y delega en `AgentOrchestrator.run()` (`src/agents`). Antes de
+   tocar el modelo, el orquestador pasa el último mensaje del usuario por
+   `RouterAgent.check_threat()` (`detect_threat`): patrones deterministas de
+   inyección de prompt, SQL o comandos se rechazan con `400` sin costo de red
+   ni de inferencia. `RouterAgent.classify_intent()` (clasificación
+   ANALYTICS_REQUIRED/DIRECT_QA con una llamada barata al SLM) existe y está
+   probado (`tests/test_router_agent.py`) pero todavía no se invoca en este
+   camino caliente — ver el docstring de `src/agents/orchestrator.py`.
+2. **RouterAgent**: construye un prompt que incluye el listado de tools
    disponibles (`ToolRegistry.list_tools()`) y las instrucciones de formato de
-   tool call, y se invoca `LLMServer.generate()` (`src/engine`, backend
-   llama.cpp sobre el modelo GGUF local).
-3. **Ejecución de tool (si aplica)**: la respuesta del SLM se intenta parsear
-   como `{"tool": "<nombre>", "arguments": {...}}`. Si no es JSON válido para
+   tool call, e invoca `LLMServer.generate()` (`src/engine`, backend
+   llama.cpp sobre el modelo GGUF local). La respuesta se intenta parsear
+   como `{"tool": "<nombre>", "arguments": {...}}`; si no es JSON válido para
    ese esquema, se trata como respuesta final en lenguaje natural y se salta
-   al paso 5. Si sí lo es, se despacha vía `ToolRegistry.dispatch()`
-   (`src/tools`), que valida los argumentos contra el `args_schema` de la
-   tool y —para `query_duckdb`— además contra `validate_sql_query`
-   (`src/guardrails`): solo se permiten `SELECT/WITH/EXPLAIN/DESCRIBE/SHOW`,
-   una única sentencia, sin palabras clave destructivas. El resultado de la
-   tool se inyecta como un mensaje de rol `tool` y se vuelve a invocar al SLM
-   para que redacte la respuesta final con ese contexto.
-4. **Guardrails de salida**: antes de responder, se rechaza (`500`) una
-   respuesta final vacía o inválida. Cualquier error de guardrail o de
-   ejecución de tool (SQL peligroso, tool desconocida, argumentos inválidos)
-   se traduce a `400`.
+   al paso 4.
+3. **AnalyticsAgent (si el RouterAgent pidió una tool)**: despacha la llamada
+   vía `ToolRegistry.dispatch()` (`src/tools`), que valida los argumentos
+   contra el `args_schema` de la tool y —para `query_duckdb`— además contra
+   `validate_sql_query` (`src/guardrails`): solo se permiten
+   `SELECT/WITH/EXPLAIN/DESCRIBE/SHOW`, una única sentencia, sin palabras
+   clave destructivas. El resultado se inyecta como un mensaje de rol `tool`
+   y se vuelve a invocar al `RouterAgent` para que redacte la respuesta final
+   con ese contexto (un único hop: si el SLM pide otra tool en esta segunda
+   pasada, el `VerifierAgent` la rechaza en el paso 4 en vez de encadenar).
+4. **VerifierAgent**: antes de responder, rechaza (`500`, `GenerationError`)
+   una respuesta final vacía o de tipo inválido —una falla del modelo, no de
+   contenido—; rechaza (`400`) una respuesta final que en realidad es un
+   tool-call sin resolver; y rechaza (`400`, `FaithfulnessError`) una
+   respuesta que menciona valores numéricos que no aparecen en el resultado
+   crudo de la tool ejecutada. Este último chequeo es una heurística local
+   (comparación de números, sin LLM juez ni red) — un filtro barato en el
+   camino caliente, no un reemplazo del `FaithfulnessMetric` de DeepEval
+   (`src/evaluation`), que sigue siendo la evaluación de referencia pero solo
+   corre offline/batch. Cualquier otro error de guardrail o de ejecución de
+   tool (SQL peligroso, tool desconocida, argumentos inválidos) también se
+   traduce a `400`.
 5. **Respuesta JSON**: se devuelve un `ChatCompletionResponse` con el mismo
    contrato que la API de OpenAI, y se registran métricas de Prometheus
    (tokens generados, latencia por token, resultado de la solicitud).
@@ -130,6 +161,9 @@ python scripts/generate_plots.py
 src/
   engine/       LLMServer (GGUF/llama.cpp), benchmarks (t/s, TTFT, RAM/VRAM)
   api/          Gateway FastAPI, contrato OpenAI, métricas Prometheus
+  agents/       Pipeline multi-agente: RouterAgent -> AnalyticsAgent (si
+                aplica) -> VerifierAgent (fidelidad numérica + formato,
+                heurística local sin red, en cada solicitud)
   tools/        ToolRegistry, herramientas industriales (query_duckdb,
                 sensor_anomaly_check, calculate_rul)
   guardrails/   Validación de SQL y de salidas JSON estrictas
@@ -146,8 +180,10 @@ outputs/
 monitoring/
   prometheus.yml  Configuración de scraping para el contenedor Prometheus
 tests/
-  test_engine.py, test_api.py, test_tools.py, test_guardrails.py,
-  test_eval.py, test_training.py, test_integration.py
+  test_engine.py, test_api.py, test_agents.py, test_router_agent.py,
+  test_analytics_agent.py, test_tools.py, test_guardrails.py, test_eval.py,
+  test_training.py, test_integration.py, y otras suites de agentes en
+  desarrollo paralelo (ver `pytest -v` para el listado completo y vigente)
 ```
 
 ## Guía de despliegue air-gapped
@@ -280,6 +316,9 @@ Por módulo:
 ```bash
 pytest tests/test_engine.py -v        # LLMServer, fallback GPU→CPU, benchmarks
 pytest tests/test_api.py -v           # Contrato HTTP, LLM mockeado
+pytest tests/test_agents.py -v        # AnalyticsAgent/VerifierAgent + AgentOrchestrator + API end-to-end
+pytest tests/test_router_agent.py -v  # RouterAgent: guardrail de entrada + clasificación de intención
+pytest tests/test_analytics_agent.py -v  # AnalyticsAgent en aislamiento (dispatch real, SQL peligroso)
 pytest tests/test_tools.py -v         # Tools industriales + ToolRegistry
 pytest tests/test_guardrails.py -v    # Validación de SQL y de JSON de salida
 pytest tests/test_eval.py -v          # Evaluador de fidelidad (métricas mockeadas)
@@ -318,3 +357,10 @@ que el nuevo rango sigue siendo compatible.
   campos desconocidos.
 - **Guardrail de salida del SLM**: se rechaza una respuesta final vacía antes
   de devolverla al cliente.
+- **Fidelidad de la respuesta final (`VerifierAgent`)**: si se ejecutó una
+  tool, se rechaza cualquier respuesta final que mencione un valor numérico
+  ausente del resultado crudo de esa tool, y cualquier respuesta final que en
+  realidad sea un tool-call sin resolver. Es una heurística local (comparación
+  de números, no un LLM juez) pensada como red de seguridad en tiempo real;
+  no reemplaza al `FaithfulnessMetric` de DeepEval (`src/evaluation`), que es
+  más riguroso pero solo corre offline/batch.
