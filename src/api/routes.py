@@ -2,36 +2,32 @@
 
 Expone `/v1/chat/completions` y `/v1/models` con el mismo contrato que la API
 de OpenAI, respaldados por el motor de inferencia local (`src.engine.LLMServer`).
-El endpoint de completions orquesta el flujo completo del agente industrial:
+El endpoint de completions delega el procesamiento a `AgentOrchestrator`
+(`src.agents`), que encadena:
 
-    validación de entrada -> inferencia SLM -> ejecución de tool (si aplica)
-    -> guardrails de salida -> respuesta JSON
+    RouterAgent (SLM + decide tool vs. respuesta final)
+    -> AnalyticsAgent (ejecuta la tool, si aplica)
+    -> VerifierAgent (fidelidad + formato de la respuesta final)
 
 Incluye métricas de Prometheus para latencia por token y throughput.
 """
 
 from __future__ import annotations
 
-import json
 import os
 import time
 import uuid
-from decimal import Decimal
-from typing import Any, Literal, Optional
+from typing import Literal, Optional
 
 from fastapi import FastAPI, HTTPException
 from prometheus_client import Counter, Histogram
 from prometheus_fastapi_instrumentator import Instrumentator
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel
 
+from src.agents import AgentMessage, AgentOrchestrator
 from src.engine import GenerationConfig, GenerationError, LLMServer, ModelLoadError
-from src.guardrails import GuardrailError, OutputValidationError, validate_json_output
-from src.tools import (
-    ToolExecutionError,
-    ToolNotFoundError,
-    ToolRegistry,
-    build_default_registry,
-)
+from src.guardrails import GuardrailError
+from src.tools import ToolExecutionError, ToolNotFoundError, ToolRegistry, build_default_registry
 
 APP_NAME = "slm-openai-gateway"
 APP_VERSION = "0.1.0"
@@ -79,6 +75,18 @@ def get_tool_registry() -> ToolRegistry:
     if _tool_registry is None:
         _tool_registry = build_default_registry()
     return _tool_registry
+
+
+def get_orchestrator() -> AgentOrchestrator:
+    """Construye el orquestador para esta solicitud.
+
+    Deliberadamente no cacheado como singleton (a diferencia de
+    `get_llm_server`/`get_tool_registry`, que sí lo son): es una envoltura
+    liviana sin I/O propio, y construirlo en cada solicitud a partir de los
+    singletons reales garantiza que un mock de `get_llm_server` (como en los
+    tests) se refleje en el orquestador sin depender del orden de las pruebas.
+    """
+    return AgentOrchestrator(get_llm_server(), get_tool_registry())
 
 
 class ChatMessage(BaseModel):
@@ -134,22 +142,6 @@ class HealthResponse(BaseModel):
     status: Literal["ok"] = "ok"
 
 
-class ToolCallEnvelope(BaseModel):
-    """Formato estructurado en el que el SLM solicita la ejecución de una tool."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    tool: str
-    arguments: dict[str, Any] = Field(default_factory=dict)
-
-
-TOOL_CALL_INSTRUCTIONS = (
-    "Si necesitas una herramienta para responder, contesta ÚNICAMENTE con un objeto JSON "
-    'con este formato exacto: {"tool": "<nombre_herramienta>", "arguments": {<argumentos>}}. '
-    "Si no necesitas ninguna herramienta, responde directamente en lenguaje natural."
-)
-
-
 def _count_tokens(text: str) -> int:
     """Aproxima el conteo de tokens por palabras.
 
@@ -157,40 +149,6 @@ def _count_tokens(text: str) -> int:
     `LLMServer.generate`, que solo devuelve el texto final.
     """
     return max(len(text.split()), 1)
-
-
-def _build_prompt(messages: list[ChatMessage], registry: ToolRegistry) -> str:
-    tool_names = ", ".join(registry.list_tools())
-    preamble = f"system: Herramientas disponibles: {tool_names}. {TOOL_CALL_INSTRUCTIONS}"
-    turns = [preamble] + [f"{message.role}: {message.content}" for message in messages]
-    turns.append("assistant:")
-    return "\n".join(turns)
-
-
-def _try_parse_tool_call(text: str) -> Optional[ToolCallEnvelope]:
-    """Intenta interpretar `text` como una solicitud de ejecución de tool.
-
-    Devuelve `None` (texto en lenguaje natural) si `text` no es un JSON válido
-    que cumpla el esquema de `ToolCallEnvelope`.
-    """
-    try:
-        return validate_json_output(text, ToolCallEnvelope)  # type: ignore[return-value]
-    except OutputValidationError:
-        return None
-
-
-def _json_default(value: Any) -> Any:
-    """Serializa tipos que DuckDB puede devolver y que `json` no soporta de forma nativa."""
-    if isinstance(value, Decimal):
-        return float(value)
-    raise TypeError(f"Object of type {type(value).__name__} is not JSON serializable")
-
-
-def _apply_output_guardrails(text: str) -> str:
-    """Guardrail de salida: rechaza respuestas vacías antes de devolverlas al cliente."""
-    if not isinstance(text, str) or not text.strip():
-        raise GenerationError("El modelo produjo una respuesta vacía o inválida.")
-    return text
 
 
 @app.get("/health", response_model=HealthResponse)
@@ -215,32 +173,13 @@ def create_chat_completion(request: ChatCompletionRequest) -> ChatCompletionResp
         top_p=request.top_p,
         stop=request.stop or [],
     )
-    registry = get_tool_registry()
+    agent_messages = [AgentMessage(role=message.role, content=message.content) for message in request.messages]
 
     start = time.perf_counter()
     try:
-        server = get_llm_server()
-        completion_text = server.generate(_build_prompt(request.messages, registry), config=config)
-
-        # Ejecución de tool (si aplica): si el SLM solicitó una herramienta en
-        # lugar de responder en lenguaje natural, se despacha y se le devuelve
-        # el resultado en un segundo turno para que redacte la respuesta final.
-        tool_call = _try_parse_tool_call(completion_text)
-        if tool_call is not None:
-            tool_result = registry.dispatch(tool_call.tool, tool_call.arguments)
-            follow_up_messages = [
-                *request.messages,
-                ChatMessage(role="assistant", content=completion_text),
-                ChatMessage(
-                    role="tool",
-                    content=json.dumps(tool_result, ensure_ascii=False, default=_json_default),
-                ),
-            ]
-            completion_text = server.generate(
-                _build_prompt(follow_up_messages, registry), config=config
-            )
-
-        completion_text = _apply_output_guardrails(completion_text)
+        orchestrator = get_orchestrator()
+        result = orchestrator.run(agent_messages, config)
+        completion_text = result.text
     except ModelLoadError as exc:
         COMPLETION_REQUESTS_TOTAL.labels(model=request.model, status="error").inc()
         raise HTTPException(status_code=503, detail=str(exc)) from exc
