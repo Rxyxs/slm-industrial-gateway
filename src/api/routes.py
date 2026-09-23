@@ -1,4 +1,5 @@
-"""Endpoints HTTP compatibles con el contrato de OpenAI para el SLM local.
+"""Endpoints HTTP compatibles con el contrato de OpenAI para el SLM local, más
+un endpoint propio de mantenimiento predictivo.
 
 Expone `/v1/chat/completions` y `/v1/models` con el mismo contrato que la API
 de OpenAI, respaldados por el motor de inferencia local (`src.engine.LLMServer`).
@@ -6,8 +7,15 @@ El endpoint de completions delega el procesamiento a `AgentOrchestrator`
 (`src.agents`), que encadena:
 
     RouterAgent (SLM + decide tool vs. respuesta final)
-    -> AnalyticsAgent (ejecuta la tool, si aplica)
+    -> AnalyticsAgent (ejecuta la tool, si aplica; incluye MaintenanceAdvisorAgent,
+       advisor, sobre el resultado de calculate_rul/sensor_anomaly_check)
     -> VerifierAgent (fidelidad + formato de la respuesta final)
+    -> SafetyComplianceAgent (límites físicos de diseño, bloqueante)
+
+`/v1/pdm/diagnose` es distinto: no pasa por el SLM ni por el orquestador de
+chat. Recibe series de condición estructuradas (vibración/temperatura/carga)
+y devuelve un diagnóstico multi-métrica vía `PdMAgent.diagnose()` -- para un
+cliente que ya sabe qué quiere diagnosticar, no para una conversación.
 
 Incluye métricas de Prometheus para latencia por token y throughput.
 """
@@ -24,7 +32,7 @@ from prometheus_client import Counter, Histogram
 from prometheus_fastapi_instrumentator import Instrumentator
 from pydantic import BaseModel
 
-from src.agents import AgentMessage, AgentOrchestrator
+from src.agents import AgentMessage, AgentOrchestrator, ConditionSeries, PdMAgent
 from src.engine import GenerationConfig, GenerationError, LLMServer, ModelLoadError
 from src.guardrails import GuardrailError
 from src.tools import ToolExecutionError, ToolNotFoundError, ToolRegistry, build_default_registry
@@ -75,6 +83,24 @@ def get_tool_registry() -> ToolRegistry:
     if _tool_registry is None:
         _tool_registry = build_default_registry()
     return _tool_registry
+
+
+_pdm_agent: Optional[PdMAgent] = None
+
+
+def get_pdm_agent() -> PdMAgent:
+    """Construye (una única vez, de forma perezosa) el agente de diagnóstico
+    predictivo, sin pasar por `get_orchestrator()`/`get_llm_server()` a
+    propósito: `PdMAgent.diagnose()` no invoca al SLM en ningún punto (solo
+    `calculate_rul`, pura computación), así que este endpoint no debería
+    forzar la carga del modelo GGUF -- un cliente que solo usa `/v1/pdm/diagnose`
+    no tiene por qué pagar ese costo ni requerir que `MODEL_PATH` exista.
+    `AgentOrchestrator.diagnose_asset()` delega en el mismo `PdMAgent`, para
+    quien construya el orquestador directamente en vez de vía este módulo."""
+    global _pdm_agent
+    if _pdm_agent is None:
+        _pdm_agent = PdMAgent(get_tool_registry())
+    return _pdm_agent
 
 
 def get_orchestrator() -> AgentOrchestrator:
@@ -142,6 +168,38 @@ class HealthResponse(BaseModel):
     status: Literal["ok"] = "ok"
 
 
+class ConditionSeriesInput(BaseModel):
+    metric: str
+    timestamps: list[float]
+    measurements: list[float]
+    failure_threshold: float
+
+
+class PdMDiagnoseRequest(BaseModel):
+    asset_id: str
+    series: list[ConditionSeriesInput]
+
+
+class MetricDiagnosisResponse(BaseModel):
+    metric: str
+    status: str
+    trend: str
+    rul_estimate: Optional[float]
+    confidence: float
+    has_out_of_range_readings: bool
+    notes: list[str]
+
+
+class PdMDiagnoseResponse(BaseModel):
+    asset_id: str
+    overall_status: str
+    overall_confidence: float
+    bottleneck_metric: Optional[str]
+    recommended_maintenance_window_hours: Optional[float]
+    metric_diagnoses: list[MetricDiagnosisResponse]
+    summary: str
+
+
 def _count_tokens(text: str) -> int:
     """Aproxima el conteo de tokens por palabras.
 
@@ -159,6 +217,47 @@ def health() -> HealthResponse:
 @app.get("/v1/models", response_model=ModelList)
 def list_models() -> ModelList:
     return ModelList(data=[ModelCard(id=MODEL_NAME, created=int(time.time()))])
+
+
+@app.post("/v1/pdm/diagnose", response_model=PdMDiagnoseResponse)
+def diagnose_asset(request: PdMDiagnoseRequest) -> PdMDiagnoseResponse:
+    """Diagnóstico de salud de un activo a partir de sus series de condición
+    (vibración/temperatura/carga/etc.), vía `PdMAgent.diagnose()`.
+
+    Deliberadamente fuera del pipeline de `/v1/chat/completions`: a diferencia
+    de una tool del SLM, este endpoint no espera una decisión del modelo sobre
+    qué invocar -- el cliente (un sistema SCADA/historian, por ejemplo) ya
+    sabe qué series de condición tiene para un activo y pide el diagnóstico
+    directamente.
+    """
+    agent = get_pdm_agent()
+    series = [ConditionSeries(**item.model_dump()) for item in request.series]
+
+    try:
+        diagnosis = agent.diagnose(request.asset_id, series)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    return PdMDiagnoseResponse(
+        asset_id=diagnosis.asset_id,
+        overall_status=diagnosis.overall_status.value,
+        overall_confidence=diagnosis.overall_confidence,
+        bottleneck_metric=diagnosis.bottleneck_metric,
+        recommended_maintenance_window_hours=diagnosis.recommended_maintenance_window_hours,
+        metric_diagnoses=[
+            MetricDiagnosisResponse(
+                metric=d.metric,
+                status=d.status.value,
+                trend=d.trend,
+                rul_estimate=d.rul_estimate,
+                confidence=d.confidence,
+                has_out_of_range_readings=d.has_out_of_range_readings,
+                notes=d.notes,
+            )
+            for d in diagnosis.metric_diagnoses
+        ],
+        summary=diagnosis.summary,
+    )
 
 
 @app.post("/v1/chat/completions", response_model=ChatCompletionResponse)

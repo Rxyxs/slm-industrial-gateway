@@ -1,0 +1,144 @@
+{
+  "model": {
+    "path": "data\\models\\model.gguf",
+    "size_mb": 2007.4203186035156
+  },
+  "environment": {
+    "platform": "Windows-10-10.0.19045-SP0",
+    "processor": "AMD64 Family 23 Model 17 Stepping 0, AuthenticAMD",
+    "cpu_count": 8,
+    "llama_cpp_python": "0.3.2",
+    "n_gpu_layers": 0,
+    "n_threads": 4,
+    "n_ctx": 4096
+  },
+  "protocol": {
+    "runs": 5,
+    "cached_repeats": 3,
+    "warmup": 1,
+    "max_tokens": 128,
+    "temperature": 0.0
+  },
+  "load_seconds": 0.8671157999779098,
+  "ram_before_load_mb": 32.50390625,
+  "ram_after_load_mb": 233.7265625,
+  "cold_runs": [
+    {
+      "ttft_seconds": 9.94519020000007,
+      "total_seconds": 42.157142999989446,
+      "tokens_generated": 128,
+      "tokens_per_second": 3.036258885001577,
+      "ram_mb": 1901.20703125,
+      "vram_mb": null,
+      "ttft_ms": 9945.19020000007,
+      "decode_tokens_per_second": 3.942635852863968
+    },
+    {
+      "ttft_seconds": 8.504455099988263,
+      "total_seconds": 38.35830990000977,
+      "tokens_generated": 128,
+      "tokens_per_second": 3.3369561988957024,
+      "ram_mb": 1901.8203125,
+      "vram_mb": null,
+      "ttft_ms": 8504.455099988263,
+      "decode_tokens_per_second": 4.254057000367956
+    },
+    {
+      "ttft_seconds": 8.155037600023206,
+      "total_seconds": 40.11421130000963,
+      "tokens_generated": 128,
+      "tokens_per_second": 3.1908891101635413,
+      "ram_mb": 1902.265625,
+      "vram_mb": null,
+      "ttft_ms": 8155.037600023206,
+      "decode_tokens_per_second": 3.9738198863399887
+    },
+    {
+      "ttft_seconds": 8.867425500007812,
+      "total_seconds": 40.61154790001456,
+      "tokens_generated": 128,
+      "tokens_per_second": 3.151812886205062,
+      "ram_mb": 1902.78125,
+      "vram_mb": null,
+      "ttft_ms": 8867.425500007812,
+      "decode_tokens_per_second": 4.000740622143424
+    },
+    {
+      "ttft_seconds": 8.483760700008133,
+      "total_seconds": 38.86304999998538,
+      "tokens_generated": 128,
+      "tokens_per_second": 3.293616944631164,
+      "ram_mb": 1903.06640625,
+      "vram_mb": null,
+      "ttft_ms": 8483.760700008133,
+      "decode_tokens_per_second": 4.180479626957406
+    }
+  ],
+  "cached_runs": [
+    {
+      "ttft_seconds": 0.23066590001690201,
+      "total_seconds": 31.529130900016753,
+      "tokens_generated": 128,
+      "tokens_per_second": 4.059737656769093,
+      "ram_mb": 1902.859375,
+      "vram_mb": null,
+      "ttft_ms": 230.66590001690201,
+      "decode_tokens_per_second": 4.057706983393614
+    },
+    {
+      "ttft_seconds": 0.250837200001115,
+      "total_seconds": 32.80679480000981,
+      "tokens_generated": 128,
+      "tokens_per_second": 3.901630768268826,
+      "ram_mb": 1902.8828125,
+      "vram_mb": null,
+      "ttft_ms": 250.83720000111498,
+      "decode_tokens_per_second": 3.9009757157309384
+    },
+    {
+      "ttft_seconds": 0.21533949999138713,
+      "total_seconds": 31.328828800003976,
+      "tokens_generated": 128,
+      "tokens_per_second": 4.085693749265972,
+      "ram_mb": 1902.8828125,
+      "vram_mb": null,
+      "ttft_ms": 215.33949999138713,
+      "decode_tokens_per_second": 4.081830834703217
+    }
+  ],
+  "summary": {
+    "ttft_ms": {
+      "median": 8504.455099988263,
+      "min": 8155.037600023206,
+      "max": 9945.19020000007
+    },
+    "tokens_per_second": {
+      "median": 3.1908891101635413,
+      "min": 3.036258885001577,
+      "max": 3.3369561988957024
+    },
+    "decode_tokens_per_second": {
+      "median": 4.000740622143424,
+      "min": 3.942635852863968,
+      "max": 4.254057000367956
+    },
+    "tokens_generated": {
+      "median": 128,
+      "min": 128,
+      "max": 128
+    },
+    "ram_mb": {
+      "median": 1902.265625,
+      "min": 1901.20703125,
+      "max": 1903.06640625
+    },
+    "vram_mb": null
+  },
+  "cached_summary": {
+    "ttft_ms": {
+      "median": 230.66590001690201,
+      "min": 215.33949999138713,
+      "max": 250.83720000111498
+    }
+  }
+}

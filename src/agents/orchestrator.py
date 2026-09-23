@@ -1,5 +1,12 @@
 """AgentOrchestrator: encadena RouterAgent -> AnalyticsAgent (si aplica, con
-evaluación PdM advisor) -> VerifierAgent -> SafetyComplianceAgent (bloqueante).
+evaluación MaintenanceAdvisorAgent) -> VerifierAgent -> SafetyComplianceAgent
+(bloqueante).
+
+No confundir `MaintenanceAdvisorAgent` con `PdMAgent` (`pdm_agent.py`): ese es
+un diagnóstico completo multi-métrica que no consume texto del SLM sino
+series de telemetría estructuradas, así que no entra en `run()` -- el
+orquestador lo expone aparte vía `diagnose_asset()`, y `src/api/routes.py` lo
+sirve en `/v1/pdm/diagnose`.
 
 Nota de diseño sobre `RouterAgent.classify_intent()`: es una capacidad real y
 probada de forma independiente (`tests/test_router_agent.py`), pero el
@@ -23,7 +30,8 @@ from src.guardrails.validators import GuardrailError, OutputValidationError, val
 from src.tools import ToolRegistry
 
 from .analytics_agent import AnalyticsAgent
-from .pdm_agent import PdMAgent
+from .maintenance_advisor import MaintenanceAdvisorAgent
+from .pdm_agent import AssetDiagnosis, ConditionSeries, PdMAgent
 from .router_agent import RouterAgent
 from .safety_agent import SafetyComplianceAgent
 from .schemas import AgentMessage, ToolCallEnvelope
@@ -66,15 +74,15 @@ class AgentOrchestrator:
     `VerifierAgent` lo rechaza como tool-call sin resolver en vez de
     encadenar indefinidamente.
 
-    `PdMAgent` (§ `pdm_agent.py`) y `SafetyComplianceAgent` (§ `safety_agent.py`)
-    juegan roles distintos a propósito: PdM es advisor -- interpreta el
-    resultado de una tool de mantenimiento predictivo y adjunta
-    `maintenance_alert` sin bloquear nada, porque un RUL bajo es información
-    operativa, no una condición insegura. SafetyComplianceAgent es la última
-    puerta bloqueante del pipeline -- corre después de `VerifierAgent`, sobre
-    el texto final ya verificado, y lanza `SafetyAlertError` si propone un
-    valor fuera de los límites físicos de diseño; esa excepción se propaga
-    sin capturar, igual que `RequestRejectedError` y `FaithfulnessError`.
+    `MaintenanceAdvisorAgent` y `SafetyComplianceAgent` juegan roles distintos
+    a propósito: el primero es advisor -- interpreta el resultado de una tool
+    de mantenimiento predictivo y adjunta `maintenance_alert` sin bloquear
+    nada, porque un RUL bajo es información operativa, no una condición
+    insegura. `SafetyComplianceAgent` es la última puerta bloqueante del
+    pipeline -- corre después de `VerifierAgent`, sobre el texto final ya
+    verificado, y lanza `SafetyAlertError` si propone un valor fuera de los
+    límites físicos de diseño; esa excepción se propaga sin capturar, igual
+    que `RequestRejectedError` y `FaithfulnessError`.
     """
 
     def __init__(
@@ -84,16 +92,18 @@ class AgentOrchestrator:
         router_agent: Optional[RouterAgent] = None,
         analytics_agent: Optional[AnalyticsAgent] = None,
         verifier_agent: Optional[VerifierAgent] = None,
-        pdm_agent: Optional[PdMAgent] = None,
+        maintenance_advisor: Optional[MaintenanceAdvisorAgent] = None,
         safety_agent: Optional[SafetyComplianceAgent] = None,
+        pdm_agent: Optional[PdMAgent] = None,
     ) -> None:
         self.llm_server = llm_server
         self.tool_registry = tool_registry
         self.router_agent = router_agent or RouterAgent(llm_server)
         self.analytics_agent = analytics_agent or AnalyticsAgent(tool_registry)
         self.verifier_agent = verifier_agent or VerifierAgent()
-        self.pdm_agent = pdm_agent or PdMAgent()
+        self.maintenance_advisor = maintenance_advisor or MaintenanceAdvisorAgent()
         self.safety_agent = safety_agent or SafetyComplianceAgent()
+        self.pdm_agent = pdm_agent or PdMAgent(tool_registry)
 
     def _latest_user_text(self, messages: List[AgentMessage]) -> str:
         for message in reversed(messages):
@@ -136,7 +146,7 @@ class AgentOrchestrator:
             analytics_result = self.analytics_agent.execute(proposal.tool_call)
             tool_context = analytics_result.raw_result
 
-            assessment = self.pdm_agent.assess(used_tool, tool_context)
+            assessment = self.maintenance_advisor.assess(used_tool, tool_context)
             if assessment.is_urgent:
                 maintenance_alert = assessment.reason
 
@@ -151,3 +161,12 @@ class AgentOrchestrator:
         self.safety_agent.audit(proposal.raw_text)
 
         return OrchestratorResult(text=proposal.raw_text, used_tool=used_tool, maintenance_alert=maintenance_alert)
+
+    def diagnose_asset(self, asset_id: str, series: List[ConditionSeries]) -> AssetDiagnosis:
+        """Delega en `PdMAgent` el diagnóstico de salud y RUL de un activo.
+
+        Fuera de `run()` a propósito: no consume texto del SLM ni pasa por
+        ningún guardrail de chat, así que no tiene sentido pedirle un
+        `AgentMessage`/`GenerationConfig` a quien lo invoca.
+        """
+        return self.pdm_agent.diagnose(asset_id, series)

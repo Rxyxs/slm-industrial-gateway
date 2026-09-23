@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import sys
 import time
 from pathlib import Path
@@ -11,7 +12,16 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from src.engine.benchmarks import current_ram_mb, current_vram_mb, run_benchmark
+from src.engine import benchmarks
+from src.engine.benchmarks import (
+    BenchmarkResult,
+    build_benchmark_prompts,
+    current_ram_mb,
+    current_vram_mb,
+    decode_tokens_per_second,
+    run_benchmark,
+    run_suite,
+)
 from src.engine.llm_server import (
     GenerationConfig,
     GenerationError,
@@ -294,3 +304,79 @@ def test_current_vram_mb_parses_nvidia_smi_output():
         "src.engine.benchmarks.subprocess.run", return_value=fake_result
     ):
         assert current_vram_mb() == 1024.0
+
+
+def _result(ttft: float, total: float, tokens: int) -> BenchmarkResult:
+    return BenchmarkResult(
+        ttft_seconds=ttft,
+        total_seconds=total,
+        tokens_generated=tokens,
+        tokens_per_second=tokens / total if total else 0.0,
+        ram_mb=None,
+        vram_mb=None,
+    )
+
+
+def test_decode_tokens_per_second_excludes_ttft():
+    # 11 tokens: el primero llega en el TTFT, los 10 restantes en 2 s de decodificación.
+    assert decode_tokens_per_second(_result(ttft=3.0, total=5.0, tokens=11)) == pytest.approx(5.0)
+
+
+def test_decode_tokens_per_second_is_zero_without_decode_phase():
+    assert decode_tokens_per_second(_result(ttft=1.0, total=1.0, tokens=1)) == 0.0
+
+
+def test_build_benchmark_prompts_are_distinct():
+    prompts = build_benchmark_prompts(15)
+    assert len(prompts) == 15
+    assert len(set(prompts)) == 15
+
+
+def test_run_suite_resets_cache_only_for_cold_runs(model_file: Path):
+    llm_instance = MagicMock()
+    server = _build_server(model_file, llm_instance)
+    events = []
+    llm_instance.reset.side_effect = lambda: events.append("reset")
+
+    def fake_stream(prompt, config=None):
+        events.append("run")
+        yield "a"
+        yield "b"
+
+    server.generate_stream = fake_stream  # type: ignore[method-assign]
+
+    suite = run_suite(server, GenerationConfig(), runs=2, cached_repeats=2, warmup=1)
+
+    # calentamiento + 2 sin caché + 1 que carga el caché: cada una precedida por reset;
+    # las 2 del control con caché, no.
+    assert events == ["reset", "run"] * 4 + ["run", "run"]
+    assert len(suite["cold_runs"]) == 2
+    assert len(suite["cached_runs"]) == 2
+    assert suite["summary"]["tokens_generated"]["median"] == 2
+
+
+def test_run_suite_rejects_zero_runs(model_file: Path):
+    server = _build_server(model_file, MagicMock())
+    with pytest.raises(ValueError):
+        run_suite(server, GenerationConfig(), runs=0)
+
+
+def test_benchmarks_main_writes_json_report(model_file: Path, tmp_path: Path):
+    llm_instance = MagicMock()
+    llm_instance.n_threads = 4
+    server = _build_server(model_file, llm_instance)
+    server.generate_stream = lambda prompt, config=None: iter(["a", "b", "c"])  # type: ignore[method-assign]
+    output = tmp_path / "bench.json"
+
+    with patch("src.engine.benchmarks.LLMServer", return_value=server):
+        exit_code = benchmarks.main(
+            ["--model-path", str(model_file), "--runs", "2", "--cached-repeats", "0", "--output", str(output)]
+        )
+
+    report = json.loads(output.read_text(encoding="utf-8"))
+    assert exit_code == 0
+    assert report["protocol"]["runs"] == 2
+    assert len(report["cold_runs"]) == 2
+    assert report["cached_runs"] == []
+    assert report["cached_summary"] is None
+    assert report["summary"]["tokens_generated"]["median"] == 3

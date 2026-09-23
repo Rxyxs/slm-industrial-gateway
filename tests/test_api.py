@@ -146,3 +146,76 @@ def test_chat_completions_records_error_metric_on_failure() -> None:
     assert response.status_code == 503
     requests_metric.labels.assert_called_once_with(model="local-slm", status="error")
     requests_metric.labels.return_value.inc.assert_called_once()
+
+
+# --------------------------------------------------------------------------- #
+# /v1/pdm/diagnose -- no pasa por el SLM ni el orquestador de chat, así que
+# estos tests no mockean nada: PdMAgent.diagnose() y su ToolRegistry
+# subyacente (calculate_rul, en memoria) son pura computación local.
+# --------------------------------------------------------------------------- #
+
+
+def test_pdm_diagnose_flags_critical_asset() -> None:
+    payload = {
+        "asset_id": "SAG-01",
+        "series": [
+            {
+                "metric": "vibration",
+                "timestamps": [0, 1, 2, 3],
+                "measurements": [10, 11, 12, 13],
+                "failure_threshold": 23,
+            }
+        ],
+    }
+
+    response = client.post("/v1/pdm/diagnose", json=payload)
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["asset_id"] == "SAG-01"
+    assert body["overall_status"] == "critical"
+    assert body["bottleneck_metric"] == "vibration"
+    assert body["recommended_maintenance_window_hours"] == pytest.approx(10.0, rel=1e-6)
+    assert len(body["metric_diagnoses"]) == 1
+
+
+def test_pdm_diagnose_healthy_asset() -> None:
+    payload = {
+        "asset_id": "PUMP-07",
+        "series": [
+            {
+                "metric": "load",
+                "timestamps": [0, 1, 2, 3],
+                "measurements": [50.0, 50.01, 50.02, 50.03],
+                "failure_threshold": 90.0,
+            }
+        ],
+    }
+
+    response = client.post("/v1/pdm/diagnose", json=payload)
+
+    assert response.status_code == 200
+    assert response.json()["overall_status"] == "healthy"
+
+
+def test_pdm_diagnose_rejects_empty_series_list() -> None:
+    response = client.post("/v1/pdm/diagnose", json={"asset_id": "SAG-02", "series": []})
+
+    assert response.status_code == 400
+
+
+def test_pdm_diagnose_multi_metric_picks_worst_as_bottleneck() -> None:
+    payload = {
+        "asset_id": "SAG-03",
+        "series": [
+            {"metric": "vibration", "timestamps": [0, 1, 2, 3], "measurements": [10, 11, 12, 13], "failure_threshold": 23},
+            {"metric": "load", "timestamps": [0, 1, 2, 3], "measurements": [50.0, 50.01, 50.02, 50.03], "failure_threshold": 90.0},
+        ],
+    }
+
+    response = client.post("/v1/pdm/diagnose", json=payload)
+
+    body = response.json()
+    assert body["overall_status"] == "critical"
+    assert body["bottleneck_metric"] == "vibration"
+    assert len(body["metric_diagnoses"]) == 2

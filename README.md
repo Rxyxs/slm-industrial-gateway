@@ -12,28 +12,33 @@ El sistema se compone de seis módulos independientes bajo `src/`, integrados
 por la capa de API a través de un pipeline multi-agente:
 
 ```
-                        ┌──────────────────────────────┐
-                        │        src/api (FastAPI)      │
-                        │  /v1/chat/completions          │
-                        │  /v1/models  /health  /metrics │
-                        └───────────────┬────────────────┘
-                                        │ delega en
-                        ┌───────────────▼─────────────────┐
-                        │  src/agents (AgentOrchestrator)   │
-                        │  RouterAgent -> AnalyticsAgent     │
-                        │  (+PdMAgent, advisor) -> Verifier- │
-                        │  Agent -> SafetyComplianceAgent    │
-                        │  (bloqueante)                      │
-                        └────┬──────────────┬──────────┬────┘
-                             ▼               ▼          ▼
-                   ┌───────────────┐ ┌──────────────┐ ┌──────────────────┐
-                   │  src/engine    │ │  src/tools    │ │  src/guardrails  │
-                   │  LLMServer     │ │  ToolRegistry │ │  validate_sql_   │
-                   │  (llama.cpp,   │ │  + industrial │ │  query,          │
-                   │  GGUF, fallback│ │  _tools       │ │  validate_json_  │
-                   │  GPU→CPU)      │ │  (DuckDB,     │ │  output          │
-                   └───────────────┘ │  Z-score, RUL)│ └──────────────────┘
-                                      └──────────────┘
+              ┌────────────────────────────────────┐
+              │           src/api (FastAPI)          │
+              │  /v1/chat/completions                 │
+              │  /v1/pdm/diagnose                     │
+              │  /v1/models  /health  /metrics        │
+              └──────────────────┬────────────────────┘
+                                 │ delega en
+              ┌──────────────────▼─────────────────────┐
+              │      src/agents (AgentOrchestrator)      │
+              │  RouterAgent -> AnalyticsAgent            │
+              │  (+MaintenanceAdvisorAgent, advisor)       │
+              │  -> VerifierAgent -> SafetyComplianceAgent │
+              │  (bloqueante)                              │
+              │                                            │
+              │  PdMAgent: registrado aparte, expuesto      │
+              │  vía diagnose_asset() -- no entra en el     │
+              │  camino de chat de arriba                   │
+              └────┬──────────────┬──────────────┬────────┘
+                   ▼               ▼               ▼
+         ┌────────────────┐ ┌───────────────┐ ┌───────────────────┐
+         │   src/engine     │ │  src/tools     │ │  src/guardrails    │
+         │   LLMServer       │ │  ToolRegistry  │ │  validate_sql_      │
+         │   (llama.cpp,      │ │  + industrial  │ │  query,              │
+         │   GGUF, fallback    │ │  _tools        │ │  validate_json_       │
+         │   GPU→CPU)           │ │  (DuckDB,      │ │  output                │
+         └──────────────────────┘ │  Z-score, RUL) │ └────────────────────────┘
+                                   └────────────────┘
 
         src/evaluation (offline, no se ejecuta en el request path)
         FaithfulnessEvaluator (DeepEval, LLM juez externo) para evaluación
@@ -65,9 +70,9 @@ flowchart LR
     Router -- texto en lenguaje natural --> Verifier
     Router -- tool call JSON --> Analytics["AnalyticsAgent<br/>DuckDB / Z-score / RUL"]
     Analytics -- SQL peligroso o tool invalida --> Err400b["HTTP 400"]
-    Analytics -- resultado OK --> PdM["PdMAgent<br/>interpreta RUL/anomalía, advisor"]
-    PdM -.->|si urgente| MaintAlert["maintenance_alert<br/>(metadata, no bloquea)"]
-    PdM --> Router2["RouterAgent<br/>segunda pasada"]
+    Analytics -- resultado OK --> Advisor["MaintenanceAdvisorAgent<br/>interpreta RUL/anomalía, advisor"]
+    Advisor -.->|si urgente| MaintAlert["maintenance_alert<br/>(metadata, no bloquea)"]
+    Advisor --> Router2["RouterAgent<br/>segunda pasada"]
     Router2 --> Verifier{"VerifierAgent<br/>formato + fidelidad numérica"}
     Verifier -- vacio/invalido (modelo) --> Err500["HTTP 500"]
     Verifier -- tool-call sin resolver o<br/>valor no sustentado --> Err400c["HTTP 400"]
@@ -100,9 +105,9 @@ flowchart LR
    `validate_sql_query` (`src/guardrails`): solo se permiten
    `SELECT/WITH/EXPLAIN/DESCRIBE/SHOW`, una única sentencia, sin palabras
    clave destructivas. Si la tool fue `calculate_rul` o `sensor_anomaly_check`,
-   `PdMAgent.assess()` (`src/agents/pdm_agent.py`) interpreta el resultado
-   crudo contra un umbral de urgencia fijo (RUL ≤ 24h, o ≥ 2 lecturas
-   anómalas) y, si corresponde, adjunta `maintenance_alert` al resultado
+   `MaintenanceAdvisorAgent.assess()` (`src/agents/maintenance_advisor.py`)
+   interpreta el resultado crudo contra un umbral de urgencia fijo (RUL ≤ 24h,
+   o ≥ 2 lecturas anómalas) y, si corresponde, adjunta `maintenance_alert` al resultado
    final — **advisor, no bloqueante**: un RUL bajo es información operativa
    para planificar mantenimiento, no una condición insegura que deba impedir
    la respuesta. El resultado de la tool se inyecta como un mensaje de rol
@@ -138,63 +143,105 @@ flowchart LR
 Todas las tools están protegidas por guardrails; ninguna tool ejecuta SQL de
 escritura ni comandos del sistema.
 
+### `PdMAgent` y `/v1/pdm/diagnose` (fuera del flujo de chat)
+
+`PdMAgent` (`src/agents/pdm_agent.py`) es una capacidad aparte, no un paso de
+`AgentOrchestrator.run()`: diagnostica un activo a partir de una o más series
+de condición (vibración, temperatura, carga) que el cliente ya tiene —
+llamando `calculate_rul` una vez por métrica, clasificando cada una como
+`healthy`/`degrading`/`critical`/`insufficient_data` según umbrales de RUL, y
+agregando el diagnóstico del activo completo (la métrica más urgente gana,
+con una confianza que baja con lecturas fuera de rango físicamente plausible).
+Degrada con gracia: una métrica con datos insuficientes no aborta el
+diagnóstico de las demás. `AgentOrchestrator.diagnose_asset(asset_id, series)`
+lo expone al resto del código, y `src/api/routes.py` lo sirve en
+`POST /v1/pdm/diagnose` — sin pasar por `get_llm_server()` (`PdMAgent` nunca
+invoca al SLM), así que el endpoint funciona aunque no haya ningún modelo GGUF
+cargado.
+
+No confundir con `MaintenanceAdvisorAgent` (§ paso 3 arriba): ese vive dentro
+del pipeline de chat e interpreta un resultado que *ya* calculó
+`AnalyticsAgent` a pedido del SLM; `PdMAgent` es un diagnóstico explícito,
+multi-métrica, pedido directamente por un cliente (un sistema SCADA/historian,
+por ejemplo) que no pasa por ninguna conversación.
+
 ## Benchmarks
 
-### Benchmark Real en Entorno Edge / CPU x86_64 (Qwen2.5-1.5B Q4_K_M)
-
-Medido de verdad, no un placeholder: `Qwen/Qwen2.5-1.5B-Instruct-GGUF`
-(`qwen2.5-1.5b-instruct-q4_k_m.gguf`, ~1.04 GB) descargado con
-`huggingface_hub`, corrido con `python -m src.engine.benchmarks
---model-path data/models/model.gguf` sobre **CPU forzada explícitamente**
-(`n_gpu_layers=0`, ver `_run_cli` en `src/engine/benchmarks.py`) -- este
-equipo no tiene GPU dedicada, así que no hay ninguna cifra de GPU en esta
-sección, medida ni estimada.
-
-![Quantization Benchmark](outputs/reports/quant_benchmark.png)
-
-| Métrica | Valor (última corrida) | Rango sobre 5 corridas |
-|---|---:|---:|
-| TTFT | 4,709 ms | 3,431 – 4,736 ms |
-| Throughput | 8.11 tok/s | 5.50 – 8.11 tok/s |
-| RAM residente (RSS) | 1,144 MB | 1,143.5 – 1,144.4 MB |
-| VRAM | N/A | sin GPU dedicada; forzado a CPU |
-
-*Hardware: AMD Ryzen 5 2500U (4 núcleos / 8 hilos, sin GPU dedicada), Windows.
-Prompt de 128 tokens de salida máx. (ver `DEFAULT_BENCHMARK_PROMPT`),
-`n_threads` autodetectado por llama.cpp. El rango viene de 5 corridas
-independientes en la misma máquina, no de una sola medición: TTFT varió
-~38% entre la corrida más rápida y la más lenta, y el throughput ~47% --
-varianza real de un laptop compartido con otros procesos, no de una GPU/CPU
-de benchmarking dedicada, y se reporta así en vez de citar solo la corrida
-más favorable. El archivo completo de la última corrida (la que grafica la
-imagen de arriba) queda versionado en
-[`outputs/reports/benchmark_result.json`](outputs/reports/benchmark_result.json)
-para que cualquiera pueda verificar el número exacto sin volver a correr el
-benchmark.*
-
-Para reproducir:
+### Motor de inferencia (medición real)
 
 ```bash
-python -m huggingface_hub download Qwen/Qwen2.5-1.5B-Instruct-GGUF \
-    qwen2.5-1.5b-instruct-q4_k_m.gguf --local-dir data/models
-cp data/models/qwen2.5-1.5b-instruct-q4_k_m.gguf data/models/model.gguf
-
-python -m src.engine.benchmarks --model-path data/models/model.gguf \
-    --model-label "Qwen2.5-1.5B-Instruct Q4_K_M"
-
-python scripts/generate_plots.py   # regenera quant_benchmark.png desde el JSON guardado
+python -m src.engine.benchmarks --model-path data/models/model.gguf
+python scripts/generate_plots.py   # dibuja gguf_benchmark.png desde el JSON
 ```
 
-### Métricas de evaluación del agente
+El primer comando corre el protocolo de `src.engine.benchmarks.run_suite` —
+una corrida de calentamiento descartada, luego 5 corridas con prompts
+distintos (limpiando el estado de llama.cpp antes de cada una, para que el
+TTFT incluya la evaluación completa del prompt), más un control de 3 corridas
+con el mismo prompt repetido *sin* limpiar (mide el TTFT con el prefijo ya en
+caché) — y guarda cada corrida en `outputs/reports/gguf_benchmark.json`, de
+donde salen la tabla y el gráfico de abajo. Modelo medido: **Qwen2.5-3B-Instruct,
+cuantización Q4_K_M (2,0 GB)**, en una laptop **AMD Ryzen 5 2500U (4 núcleos /
+8 hilos, 7 GB de RAM), solo CPU** (`n_gpu_layers=0`, 4 hilos, `n_ctx=4096`),
+llama-cpp-python 0.3.2 (wheel CPU) -- este equipo no tiene GPU dedicada, así
+que no hay ninguna cifra de GPU en esta sección, medida ni estimada.
 
-> **Los números de esta sub-sección siguen siendo ilustrativos.** A
-> diferencia del benchmark de arriba, correr `src/evaluation.FaithfulnessEvaluator`
-> de verdad requiere un modelo juez externo (por defecto `gpt-4o-mini` vía
-> API) que este comando no invoca -- no es un límite de CPU/GPU sino de
-> credenciales de red, fuera del alcance de esta corrida. Reemplazar estos
-> valores exige correr el evaluador aparte sobre un set de prueba real, más
-> las tasas de SQL Safety / JSON Validity de `src.guardrails` sobre intentos
-> de dispatch de tools registrados.
+![GGUF Benchmark](outputs/reports/gguf_benchmark.png)
+
+| Métrica | Mediana | Rango (5 corridas) |
+|---------|--------:|--------------------:|
+| TTFT, prompt nuevo (ms) | 8 504 | 8 155 – 9 945 |
+| Throughput extremo a extremo (tok/s) | 3,2 | 3,0 – 3,3 |
+| Throughput solo decodificación (tok/s) | 4,0 | 3,9 – 4,3 |
+| RAM residente del proceso (MB) | 1 902 | 1 901 – 1 903 |
+| VRAM (MB) | n/a (sin GPU NVIDIA) | — |
+
+**Cómo leer los números.**
+
+- *TTFT y caché de prefijo.* llama-cpp-python reutiliza el prefijo común con
+  el prompt anterior. Como control, repetir el mismo prompt sin `reset()` da
+  un TTFT mediano de **231 ms** (3 corridas, 215–251 ms), unas 37 veces menos:
+  no es el costo de un prompt nuevo, sino el de un caché caliente. El número
+  de la tabla es el caso sin caché.
+- *Throughput.* `run_benchmark` divide los tokens por el tiempo total, que
+  incluye el TTFT; la fila "solo decodificación" excluye ese tiempo. Con
+  respuestas cortas y un prompt lento, la diferencia entre ambas es grande.
+- *RAM.* El modelo se mapea con `mmap`: tras cargarlo, el proceso ocupaba
+  234 MB, y sube a ~1,9 GB a medida que la inferencia toca los pesos.
+- *Variación entre sesiones.* Una sesión anterior en la misma máquina, con el
+  mismo protocolo y prompts casi iguales, dio TTFT 7 891 ms, 2,9 tok/s
+  extremo a extremo y 3,5 tok/s de decodificación: diferencias de 8–15 %,
+  mayores que el rango dentro de cada sesión. Leer los números con esa
+  precisión, no con la de la tabla.
+
+**Limitaciones.** Una sola cuantización y un solo modelo (3B, no 7B): no hay
+todavía una comparación FP16 / Q8_0 / Q4_K_M medida (`quant_benchmark.png`
+sigue siendo el placeholder ilustrativo de siempre, ver abajo). El hardware es
+una laptop con memoria justa (≈2,5 GB libres y swap en uso), así que estos
+números son un piso, no el rendimiento esperable en el hardware de destino.
+La versión de llama-cpp-python medida (0.3.2) no es la fijada en
+`requirements.txt` (0.3.4), porque no hay wheel precompilado de 0.3.4 para
+Python 3.10 en Windows. Sin intervalo de confianza: 5 corridas. El JSON
+completo (todas las corridas, cruda) queda versionado en
+[`outputs/reports/gguf_benchmark.json`](outputs/reports/gguf_benchmark.json)
+para que cualquiera pueda verificar los números exactos sin volver a correr
+el benchmark.
+
+`quant_benchmark.png` sigue mostrando los valores **ilustrativos** de
+`scripts/generate_plots.py` (FP16/Q8_0/Q4_K_M para 7B), que no son una
+medición y no deben citarse como tal:
+
+![Quantization Benchmark (ilustrativo)](outputs/reports/quant_benchmark.png)
+
+### Evaluación del agente (ilustrativa)
+
+> **Los números de esta subsección son ilustrativos, no una medición real.**
+> Correr `src/evaluation.FaithfulnessEvaluator` de verdad requiere un modelo
+> juez externo (por defecto `gpt-4o-mini` vía API) — no es un límite de
+> CPU/GPU sino de credenciales de red, fuera del alcance de este benchmark.
+> Reemplazar estos valores exige correr el evaluador aparte sobre un set de
+> prueba real, más las tasas de SQL Safety / JSON Validity de
+> `src.guardrails` sobre intentos de dispatch de tools registrados.
 
 ![Eval Metrics](outputs/reports/eval_metrics.png)
 
@@ -205,26 +252,25 @@ python scripts/generate_plots.py   # regenera quant_benchmark.png desde el JSON 
 | SQL Safety Rate      | 1.00  | Fracción de intentos de `query_duckdb` con SQL peligroso correctamente bloqueados por `validate_sql_query`. |
 | JSON Validity        | 0.97  | Fracción de tool calls emitidas por el SLM que parsean como `ToolCallEnvelope` sin error de esquema. |
 
-Para regenerar ambos gráficos: el de cuantización lee
-`outputs/reports/benchmark_result.json` si existe (la corrida real de arriba)
-y cae al placeholder ilustrativo si no; el de métricas de evaluación sigue
-siendo siempre el placeholder.
-
-```bash
-python scripts/generate_plots.py
-```
+`python scripts/generate_plots.py` regenera los tres gráficos:
+`gguf_benchmark.png` desde el JSON medido (se omite si el JSON no existe, sin
+inventar valores) y los dos ilustrativos desde los valores fijos del script.
 
 ## Estructura del repositorio
 
 ```
 src/
-  engine/       LLMServer (GGUF/llama.cpp), benchmarks (CLI real: t/s, TTFT, RAM/VRAM)
-  api/          Gateway FastAPI, contrato OpenAI, métricas Prometheus
-  agents/       Pipeline multi-agente: RouterAgent -> AnalyticsAgent (si
-                aplica, con evaluación PdMAgent advisor) -> VerifierAgent
-                (fidelidad numérica + formato) -> SafetyComplianceAgent
-                (límites físicos, bloqueante) -- los cuatro, locales y sin
-                red en cada solicitud
+  engine/       LLMServer (GGUF/llama.cpp), benchmarks (CLI real: run_suite,
+                cold/cached TTFT, throughput extremo-a-extremo/decodificación)
+  api/          Gateway FastAPI, contrato OpenAI + /v1/pdm/diagnose, métricas
+                Prometheus
+  agents/       Pipeline de chat: RouterAgent -> AnalyticsAgent (si aplica,
+                con evaluación MaintenanceAdvisorAgent advisor) ->
+                VerifierAgent (fidelidad numérica + formato) ->
+                SafetyComplianceAgent (límites físicos, bloqueante) -- todos
+                locales y sin red en cada solicitud. PdMAgent aparte:
+                diagnóstico multi-métrica, expuesto vía diagnose_asset()
+                y /v1/pdm/diagnose, no entra en ese pipeline
   tools/        ToolRegistry, herramientas industriales (query_duckdb,
                 sensor_anomaly_check, calculate_rul)
   guardrails/   Validación de SQL y de salidas JSON estrictas
@@ -234,18 +280,23 @@ data/
   domain_dataset/  Dataset sintético ChatML de dominio (telemetría/sensores)
   models/          Pesos GGUF locales (no versionado; ver instalación)
 scripts/
-  quantize.py       Verifica/carga modelos GGUF cuantizados (Q4_K_M, Q8_0)
-  generate_plots.py Genera los gráficos de `outputs/reports/` (ver Benchmarks)
+  quantize.py             Verifica/carga modelos GGUF cuantizados (Q4_K_M, Q8_0)
+  generate_plots.py       Genera los gráficos de `outputs/reports/` (ver Benchmarks)
+  verify_finetuning_pipeline.py  Valida el pipeline QLoRA de punta a punta sin
+                          GPU (dataset, config, intento de carga del modelo
+                          base) y guarda el estado real en finetuning_metrics.json
 outputs/
   reports/        Gráficos versionados que embeben el README (PNG), más
-                   benchmark_result.json (última corrida real de CPU)
+                   gguf_benchmark.json (última corrida real de CPU) y
+                   finetuning_metrics.json (estado verificado del pipeline QLoRA)
 monitoring/
   prometheus.yml  Configuración de scraping para el contenedor Prometheus
 tests/
   test_engine.py, test_api.py, test_agents.py, test_router_agent.py,
-  test_analytics_agent.py, test_pdm_agent.py, test_safety_agent.py,
-  test_tools.py, test_guardrails.py, test_eval.py, test_training.py,
-  test_integration.py (ver `pytest -v` para el listado completo y vigente)
+  test_analytics_agent.py, test_maintenance_advisor.py, test_pdm_agent.py,
+  test_safety_agent.py, test_tools.py, test_guardrails.py, test_eval.py,
+  test_training.py, test_integration.py (ver `pytest -v` para el listado
+  completo y vigente)
 ```
 
 ## Guía de despliegue air-gapped
@@ -360,7 +411,7 @@ docker compose up -d --build
 ```
 
 Expone:
-- API: `127.0.0.1:8000` (`/v1/chat/completions`, `/v1/models`, `/health`, `/metrics`)
+- API: `127.0.0.1:8000` (`/v1/chat/completions`, `/v1/pdm/diagnose`, `/v1/models`, `/health`, `/metrics`)
 - Prometheus: `127.0.0.1:9090`, con scraping ya configurado hacia
   `slm-api:8000/metrics` (ver `monitoring/prometheus.yml`)
 
@@ -381,7 +432,8 @@ pytest tests/test_api.py -v           # Contrato HTTP, LLM mockeado
 pytest tests/test_agents.py -v        # AnalyticsAgent/VerifierAgent + AgentOrchestrator + API end-to-end
 pytest tests/test_router_agent.py -v  # RouterAgent: guardrail de entrada + clasificación de intención
 pytest tests/test_analytics_agent.py -v  # AnalyticsAgent en aislamiento (dispatch real, SQL peligroso)
-pytest tests/test_pdm_agent.py -v     # PdMAgent: interpretación de RUL/anomalía, advisor (nunca lanza)
+pytest tests/test_maintenance_advisor.py -v  # MaintenanceAdvisorAgent: interpreta RUL/anomalía, advisor (nunca lanza)
+pytest tests/test_pdm_agent.py -v     # PdMAgent: diagnóstico multi-métrica, RUL, confianza, degradación con gracia
 pytest tests/test_safety_agent.py -v  # SafetyComplianceAgent: límites físicos de diseño, bloqueante
 pytest tests/test_tools.py -v         # Tools industriales + ToolRegistry
 pytest tests/test_guardrails.py -v    # Validación de SQL y de JSON de salida
@@ -433,5 +485,7 @@ que el nuevo rango sigue siendo compatible.
   proponga un valor de potencia, presión o temperatura por encima del límite
   de diseño fijo del sitio (`OPERATIONAL_LIMITS`, inmutable en runtime, sin
   variable de entorno que lo relaje) — la respuesta nunca llega al cliente,
-  ni parcialmente. No confundir con `PdMAgent`: ese es advisor (adjunta
-  `maintenance_alert` sin bloquear nada), este bloquea.
+  ni parcialmente. No confundir con `MaintenanceAdvisorAgent` (advisor, adjunta
+  `maintenance_alert` sin bloquear nada) ni con `PdMAgent` (diagnóstico
+  explícito vía `/v1/pdm/diagnose`, fuera del pipeline de chat) — de los tres,
+  solo `SafetyComplianceAgent` bloquea.
