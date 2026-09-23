@@ -117,7 +117,16 @@ def load_base_model_and_tokenizer(config: QLoRATrainingConfig):
     """
     try:
         from unsloth import FastLanguageModel
-    except ImportError as exc:
+    except (ImportError, NotImplementedError) as exc:
+        # Windows sin unsloth instalado: falla en el propio `import unsloth` con
+        # ImportError. Linux con unsloth instalado pero sin acelerador (el caso
+        # de CI, verificado corriendo el workflow real): `import unsloth` sí
+        # progresa, pero dispara su propio chequeo de hardware
+        # (`unsloth_zoo.device_type.get_device_type()`) durante la carga del
+        # módulo, y ese chequeo lanza `NotImplementedError` en vez de
+        # `ImportError` cuando no encuentra CUDA/ROCm/XPU. Dos excepciones
+        # distintas para la misma condición real ("no hay unsloth utilizable
+        # acá"), así que ambas se traducen al mismo mensaje.
         raise ImportError(
             "Unsloth no está instalado o no hay GPU CUDA disponible. Instala 'unsloth' y "
             "'bitsandbytes' en un entorno con GPU para ejecutar el entrenamiento QLoRA real."
