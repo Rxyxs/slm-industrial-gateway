@@ -235,28 +235,82 @@ medición y no deben citarse como tal:
 
 ![Quantization Benchmark (ilustrativo)](outputs/reports/quant_benchmark.png)
 
-### Evaluación del agente (ilustrativa)
+### Evaluación offline del agente (medición real, 100 prompts)
 
-> **Los números de esta subsección son ilustrativos, no una medición real.**
-> Correr `src/evaluation.FaithfulnessEvaluator` de verdad requiere un modelo
-> juez externo (por defecto `gpt-4o-mini` vía API) — no es un límite de
-> CPU/GPU sino de credenciales de red, fuera del alcance de este benchmark.
-> Reemplazar estos valores exige correr el evaluador aparte sobre un set de
-> prueba real, más las tasas de SQL Safety / JSON Validity de
-> `src.guardrails` sobre intentos de dispatch de tools registrados.
+```bash
+python scripts/build_eval_prompts.py     # genera data/eval_prompts.json (100 prompts, 4 categorías)
+python -m src.evaluation.run_offline_eval  # corre el agente real sobre los 100 -> outputs/reports/eval_metrics.json
+python scripts/generate_plots.py           # dibuja eval_metrics.png desde ese JSON
+```
+
+`data/eval_prompts.json` tiene 100 prompts de dominio minero/industrial (no
+los ≥10 que pedía el plan original: la regla del usuario de mínimo 100 casos
+de test antes de reportar cualquier métrica de "qué tan bien funciona" un
+sistema exige ese piso -- con 10 casos, un "52% de bloqueo" es compatible con
+cualquier valor entre ~25% y ~78%, un intervalo demasiado ancho para decir
+algo). 25 por categoría (`anomaly_check`, `rul`, `safety_boundary`,
+`duckdb_analytics`), generados por `scripts/build_eval_prompts.py` combinando
+≥8 plantillas de frase distintas con parámetros/activos que varían
+independientemente, para que ningún par de prompts comparta ni estructura ni
+valores. La mitad de los 25 de `safety_boundary` pide un valor por encima del
+límite físico de diseño (>150 MW / >3000 PSI / >650 °C); la otra mitad,
+deliberadamente dentro de rango, como control negativo.
+
+`src/evaluation/run_offline_eval.py` corre el `AgentOrchestrator` real (SLM
+real -- Qwen2.5-1.5B, **sin fine-tuning**, ver §"Notas de compatibilidad" --,
+`ToolRegistry` real, guardrails reales) sobre los 100, sin ningún modelo
+juez externo.
 
 ![Eval Metrics](outputs/reports/eval_metrics.png)
 
-| Métrica            | Valor | Qué mide |
-|---------------------|------:|----------|
-| Faithfulness         | 0.93  | El `FaithfulnessMetric` de DeepEval: cuánto de la respuesta está sustentado por el contexto recuperado. |
-| Answer Relevancy     | 0.89  | Qué tan pertinente es la respuesta final respecto a la pregunta del usuario. |
-| SQL Safety Rate      | 1.00  | Fracción de intentos de `query_duckdb` con SQL peligroso correctamente bloqueados por `validate_sql_query`. |
-| JSON Validity        | 0.97  | Fracción de tool calls emitidas por el SLM que parsean como `ToolCallEnvelope` sin error de esquema. |
+**Hallazgo honesto #1: el 94% de los 100 prompts (94/100, las 4 categorías
+por igual, 88%–100%) se bloqueó por argumentos de tool inválidos, no por
+diseño de seguridad.** Este modelo base de 1.5B (sin el fine-tuning QLoRA que
+`src/training/` ya tiene) es muy poco confiable siguiendo el contrato exacto
+de nombres de campo de las tools: alucina nombres de argumento plausibles
+pero incorrectos (`device_id`, `power_level`, `time_period`,
+`vibration_readings` en vez de `readings`...) casi siempre, y el esquema
+Pydantic estricto (`extra="forbid"`, sin coerción de tipos) lo rechaza
+correctamente. Es exactamente el problema que el pipeline de fine-tuning de
+este repositorio existe para resolver -- este resultado es un argumento real
+a favor de correrlo, no una falla del gateway.
 
-`python scripts/generate_plots.py` regenera los tres gráficos:
-`gguf_benchmark.png` desde el JSON medido (se omite si el JSON no existe, sin
-inventar valores) y los dos ilustrativos desde los valores fijos del script.
+**Hallazgo honesto #2: por eso mismo, no se puede reportar un "Safety Block
+Rate" de una sola cifra sin decir qué mide.** De los 25 prompts de
+`safety_boundary`, solo **1** disparó un `SafetyAlertError` genuino
+(`SafetyComplianceAgent` auditando una respuesta final real); **22** se
+bloquearon antes, por el mismo problema de argumentos de tool inválidos del
+hallazgo #1 -- bloqueados igual, pero no porque el guardrail de seguridad
+hiciera su trabajo, sino porque el modelo nunca llegó a producir una
+respuesta que auditar. Solo **2** de los 25 llegaron a una respuesta final.
+Una fracción "52% bloqueado" (13/25 correctos según si debía o no bloquearse,
+IC95% [33%, 70%] -- ancho, con n=25) sonaría a que el sistema es
+razonablemente seguro; el desglose real dice que casi no hubo oportunidad de
+observar si `SafetyComplianceAgent` funciona bien o mal, porque casi ningún
+prompt llegó tan lejos.
+
+**Un caso reproducido de forma independiente muestra además un límite real
+del propio `SafetyComplianceAgent`**: cuando el intento de tool-call del
+modelo es JSON sintácticamente inválido (no solo con argumentos incorrectos,
+sino varios objetos JSON pegados), el orquestador lo trata como respuesta
+final en lenguaje natural en vez de rechazarlo -- y el regex de
+`SafetyComplianceAgent` (`\d+\s*°C`, etc.) no detecta el valor peligroso si
+no queda pegado a su unidad en ese texto (p. ej. `"temperature": 700` dentro
+de un JSON roto, sin la cadena literal `700 °C`). Verificado corriendo el
+prompt `safety_14` por separado, dos veces, con el mismo patrón. No se
+generalizó a "todos los casos 'ok' fallan así" sin verificarlo -- uno de los
+otros casos 'ok' (`duckdb_04`) fue una respuesta en lenguaje natural genuina
+y correcta, sin ningún problema.
+
+**Faithfulness y Answer Relevancy (DeepEval) siguen sin medirse.** Requieren
+un modelo juez externo (`gpt-4o-mini` por defecto) con `OPENAI_API_KEY`, no
+disponible en este entorno -- limitación de credenciales de red, no de
+CPU/GPU. `outputs/reports/eval_metrics.json` los deja como `null`, con una
+nota explicando por qué, no con un número estimado.
+
+El JSON completo (los 100 resultados individuales, con el detalle exacto de
+cada bloqueo) queda versionado en
+[`outputs/reports/eval_metrics.json`](outputs/reports/eval_metrics.json).
 
 ## Estructura del repositorio
 
@@ -276,20 +330,25 @@ src/
   tools/        ToolRegistry, herramientas industriales (query_duckdb,
                 sensor_anomaly_check, calculate_rul)
   guardrails/   Validación de SQL y de salidas JSON estrictas
-  evaluation/   Evaluador de fidelidad/alucinación (DeepEval, offline)
+  evaluation/   FaithfulnessEvaluator (DeepEval, requiere judge externo) +
+                run_offline_eval.py (evaluación real sin judge: Safety Block
+                Rate desglosado, sobre 100 prompts de dominio)
   training/     Pipeline QLoRA (dataset_prep.py, finetune.py)
 data/
-  domain_dataset/  Dataset sintético ChatML de dominio (telemetría/sensores)
-  models/          Pesos GGUF locales (no versionado; ver instalación)
+  domain_dataset/    Dataset sintético ChatML de dominio (telemetría/sensores)
+  eval_prompts.json  100 prompts de evaluación (4 categorías x 25, ver Benchmarks)
+  models/            Pesos GGUF locales (no versionado; ver instalación)
 scripts/
   quantize.py             Verifica/carga modelos GGUF cuantizados (Q4_K_M, Q8_0)
   generate_plots.py       Genera los gráficos de `outputs/reports/` (ver Benchmarks)
+  build_eval_prompts.py   Genera data/eval_prompts.json (100 prompts, ver Benchmarks)
   verify_finetuning_pipeline.py  Valida el pipeline QLoRA de punta a punta sin
                           GPU (dataset, config, intento de carga del modelo
                           base) y guarda el estado real en finetuning_metrics.json
 outputs/
   reports/        Gráficos versionados que embeben el README (PNG), más
-                   gguf_benchmark.json (última corrida real de CPU) y
+                   gguf_benchmark.json (última corrida real de CPU),
+                   eval_metrics.json (evaluación offline real, 100 prompts) y
                    finetuning_metrics.json (estado verificado del pipeline QLoRA)
 monitoring/
   prometheus.yml  Configuración de scraping para el contenedor Prometheus
@@ -297,8 +356,8 @@ tests/
   test_engine.py, test_api.py, test_agents.py, test_router_agent.py,
   test_analytics_agent.py, test_maintenance_advisor.py, test_pdm_agent.py,
   test_safety_agent.py, test_tools.py, test_guardrails.py, test_eval.py,
-  test_training.py, test_integration.py (ver `pytest -v` para el listado
-  completo y vigente)
+  test_offline_eval.py, test_training.py, test_integration.py (ver
+  `pytest -v` para el listado completo y vigente)
 ```
 
 ## Guía de despliegue air-gapped
@@ -440,6 +499,7 @@ pytest tests/test_safety_agent.py -v  # SafetyComplianceAgent: límites físicos
 pytest tests/test_tools.py -v         # Tools industriales + ToolRegistry
 pytest tests/test_guardrails.py -v    # Validación de SQL y de JSON de salida
 pytest tests/test_eval.py -v          # Evaluador de fidelidad (métricas mockeadas)
+pytest tests/test_offline_eval.py -v  # Harness de evaluación offline: Safety Block Rate, IC de Wilson (sin SLM real)
 pytest tests/test_training.py -v      # Dataset ChatML, config y args de QLoRA
 pytest tests/test_integration.py -v   # End-to-end: API + tools + guardrails reales
 ```

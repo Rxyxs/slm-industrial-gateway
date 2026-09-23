@@ -31,6 +31,7 @@ import seaborn as sns
 OUTPUT_DIR = Path(__file__).resolve().parent.parent / "outputs" / "reports"
 
 MEASURED_BENCHMARK_PATH = OUTPUT_DIR / "gguf_benchmark.json"
+MEASURED_EVAL_PATH = OUTPUT_DIR / "eval_metrics.json"
 
 DISCLAIMER = "Datos ilustrativos - pendientes de validar en hardware real"
 
@@ -117,8 +118,90 @@ def plot_quant_benchmark(output_dir: Path = OUTPUT_DIR) -> Path:
     return out_path
 
 
-def plot_eval_metrics(output_dir: Path = OUTPUT_DIR) -> Path:
-    """Metricas de evaluacion del agente (una sola serie, escala 0-1 compartida)."""
+def _load_real_eval_summary(path: Path = MEASURED_EVAL_PATH) -> Optional[dict]:
+    if not path.exists():
+        return None
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def _plot_real_eval_metrics(summary: dict, output_dir: Path) -> Path:
+    """Desglose real de los 25 prompts de safety_boundary + tasa de bloqueo
+    por argumentos de tool invalidos en las 4 categorias -- las dos cosas que
+    `run_offline_eval.py` mide sin modelo juez externo. Deliberadamente NO
+    dibuja un unico "Safety Block Rate" como si fuera una sola cosa: ese
+    numero mezcla un SafetyAlertError genuino con un bloqueo previo por
+    argumentos de tool mal formados (ver `confound_warning` en el JSON), y
+    graficarlo como una sola barra ocultaria justo esa distincion. Faithfulness/
+    Answer Relevancy se anotan como no medidos, nunca con una barra inventada."""
+    _apply_style()
+    sbr = summary["safety_block_rate"]
+    genuine = sbr["genuine_safety_alerts"]
+    guardrail_only = sbr["guardrail_only_blocks"]
+    reached = sbr["reached_final_answer"]
+    n = sbr["n"]
+
+    status_by_category = summary["status_by_category"]
+    categories = list(status_by_category)
+    guardrail_rates = [
+        status_by_category[c].get("blocked_guardrail", 0) / sum(status_by_category[c].values())
+        for c in categories
+    ]
+
+    fig, (ax_safety, ax_guard) = plt.subplots(1, 2, figsize=(10.5, 4.8), gridspec_kw={"width_ratios": [1, 1.4]})
+    fig.suptitle(
+        f"Evaluacion offline real del agente -- {summary['n_prompts']} prompts de dominio",
+        fontsize=13,
+        fontweight="bold",
+        color=TEXT_PRIMARY,
+    )
+    fig.text(
+        0.5, 0.915,
+        f"src/evaluation/run_offline_eval.py, SLM real (Qwen2.5-1.5B, sin fine-tuning), "
+        f"sin modelo juez externo ({summary['elapsed_seconds']:.0f}s de corrida)",
+        ha="center", fontsize=9, color=TEXT_SECONDARY, style="italic",
+    )
+
+    # Barra apilada: por que se bloqueo cada uno de los 25 prompts de
+    # safety_boundary -- la distincion que un unico "block rate" escondia.
+    segments = [
+        ("SafetyAlertError\ngenuino", genuine, "#e34948"),
+        ("Bloqueado antes\n(args de tool invalidos)", guardrail_only, "#eda100"),
+        ("Llego a respuesta\nfinal ('ok')", reached, "#1baf7a"),
+    ]
+    bottom = 0
+    for label, value, color in segments:
+        ax_safety.bar(["safety_boundary\n(n=25)"], [value], bottom=[bottom], color=color, width=0.5, label=label)
+        if value:
+            ax_safety.text(0, bottom + value / 2, str(value), ha="center", va="center", fontsize=10, color="white", fontweight="bold")
+        bottom += value
+    ax_safety.set_ylim(0, n * 1.05)
+    ax_safety.set_ylabel("prompts")
+    ax_safety.set_title("Por que se bloqueo cada prompt de seguridad", fontsize=10, color=TEXT_SECONDARY)
+    ax_safety.set_xticks([])
+    ax_safety.set_xlabel("safety_boundary (n=25)", fontsize=9, color=TEXT_SECONDARY)
+    ax_safety.legend(loc="upper center", bbox_to_anchor=(0.5, -0.14), fontsize=7.5, ncol=1, frameon=False)
+    sns.despine(ax=ax_safety)
+
+    bars_guard = ax_guard.bar(categories, guardrail_rates, color=QUANT_COLORS["Q8_0"], width=0.55)
+    ax_guard.set_ylim(0, 1.05)
+    ax_guard.set_ylabel("fraccion bloqueada\npor args de tool invalidos", fontsize=9)
+    ax_guard.set_title("Bloqueo por args de tool invalidos, las 4 categorias", fontsize=10, color=TEXT_SECONDARY)
+    ax_guard.bar_label(bars_guard, padding=3, fontsize=9, color=TEXT_PRIMARY, fmt="%.2f")
+    ax_guard.text(
+        0.5, -0.22, "Faithfulness / Answer Relevancy: no medido (requiere judge model externo)",
+        ha="center", va="top", fontsize=8, color=TEXT_SECONDARY, transform=ax_guard.transAxes,
+    )
+    sns.despine(ax=ax_guard)
+
+    fig.tight_layout(rect=(0, 0.1, 1, 0.86))
+    output_dir.mkdir(parents=True, exist_ok=True)
+    out_path = output_dir / "eval_metrics.png"
+    fig.savefig(out_path, dpi=150)
+    plt.close(fig)
+    return out_path
+
+
+def _plot_illustrative_eval_metrics(output_dir: Path) -> Path:
     _apply_style()
     metrics = list(ILLUSTRATIVE_EVAL_METRICS)
     scores = [ILLUSTRATIVE_EVAL_METRICS[metric] for metric in metrics]
@@ -144,6 +227,15 @@ def plot_eval_metrics(output_dir: Path = OUTPUT_DIR) -> Path:
     fig.savefig(out_path, dpi=150)
     plt.close(fig)
     return out_path
+
+
+def plot_eval_metrics(output_dir: Path = OUTPUT_DIR) -> Path:
+    """Grafica la evaluacion offline real (`eval_metrics.json`) si existe;
+    si no, cae al placeholder ilustrativo de siempre (marcado como tal)."""
+    summary = _load_real_eval_summary()
+    if summary is not None:
+        return _plot_real_eval_metrics(summary, output_dir)
+    return _plot_illustrative_eval_metrics(output_dir)
 
 
 def _strip(ax, x: float, values: list, color: str) -> float:
@@ -243,10 +335,19 @@ def main() -> None:
     else:
         print(f"[OK] {measured_path} (medicion real)")
     quant_path = plot_quant_benchmark()
-    eval_path = plot_eval_metrics()
     print(f"[OK] {quant_path}")
-    print(f"[OK] {eval_path}")
-    print(f"[AVISO] quant_benchmark.png y eval_metrics.png: {DISCLAIMER}")
+    print(f"[AVISO] quant_benchmark.png: {DISCLAIMER}")
+
+    eval_summary = _load_real_eval_summary()
+    eval_path = plot_eval_metrics()
+    if eval_summary is not None:
+        print(f"[OK] {eval_path} (medicion real, {eval_summary['n_prompts']} prompts)")
+    else:
+        print(f"[OK] {eval_path} (ILUSTRATIVO)")
+        print(
+            f"[AVISO] eval_metrics.png: no existe {MEASURED_EVAL_PATH}; "
+            "correr `python -m src.evaluation.run_offline_eval`"
+        )
 
 
 if __name__ == "__main__":
