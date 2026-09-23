@@ -1,4 +1,5 @@
-"""AgentOrchestrator: encadena RouterAgent -> AnalyticsAgent (si aplica) -> VerifierAgent.
+"""AgentOrchestrator: encadena RouterAgent -> AnalyticsAgent (si aplica, con
+evaluación PdM advisor) -> VerifierAgent -> SafetyComplianceAgent (bloqueante).
 
 Nota de diseño sobre `RouterAgent.classify_intent()`: es una capacidad real y
 probada de forma independiente (`tests/test_router_agent.py`), pero el
@@ -22,7 +23,9 @@ from src.guardrails.validators import GuardrailError, OutputValidationError, val
 from src.tools import ToolRegistry
 
 from .analytics_agent import AnalyticsAgent
+from .pdm_agent import PdMAgent
 from .router_agent import RouterAgent
+from .safety_agent import SafetyComplianceAgent
 from .schemas import AgentMessage, ToolCallEnvelope
 from .verifier_agent import VerifierAgent
 
@@ -51,14 +54,27 @@ class OrchestratorResult:
 
     text: str
     used_tool: Optional[str] = None
+    maintenance_alert: Optional[str] = None
 
 
 class AgentOrchestrator:
-    """Coordina el pipeline multi-agente: guardrail de entrada -> SLM -> tool (si aplica) -> verificación.
+    """Coordina el pipeline multi-agente: guardrail de entrada -> SLM -> tool
+    (si aplica, con evaluación PdM advisor) -> verificación -> auditoría de
+    seguridad física (bloqueante).
 
     Un único hop de tool: si tras ejecutar una tool el SLM pide otra, el
     `VerifierAgent` lo rechaza como tool-call sin resolver en vez de
     encadenar indefinidamente.
+
+    `PdMAgent` (§ `pdm_agent.py`) y `SafetyComplianceAgent` (§ `safety_agent.py`)
+    juegan roles distintos a propósito: PdM es advisor -- interpreta el
+    resultado de una tool de mantenimiento predictivo y adjunta
+    `maintenance_alert` sin bloquear nada, porque un RUL bajo es información
+    operativa, no una condición insegura. SafetyComplianceAgent es la última
+    puerta bloqueante del pipeline -- corre después de `VerifierAgent`, sobre
+    el texto final ya verificado, y lanza `SafetyAlertError` si propone un
+    valor fuera de los límites físicos de diseño; esa excepción se propaga
+    sin capturar, igual que `RequestRejectedError` y `FaithfulnessError`.
     """
 
     def __init__(
@@ -68,12 +84,16 @@ class AgentOrchestrator:
         router_agent: Optional[RouterAgent] = None,
         analytics_agent: Optional[AnalyticsAgent] = None,
         verifier_agent: Optional[VerifierAgent] = None,
+        pdm_agent: Optional[PdMAgent] = None,
+        safety_agent: Optional[SafetyComplianceAgent] = None,
     ) -> None:
         self.llm_server = llm_server
         self.tool_registry = tool_registry
         self.router_agent = router_agent or RouterAgent(llm_server)
         self.analytics_agent = analytics_agent or AnalyticsAgent(tool_registry)
         self.verifier_agent = verifier_agent or VerifierAgent()
+        self.pdm_agent = pdm_agent or PdMAgent()
+        self.safety_agent = safety_agent or SafetyComplianceAgent()
 
     def _latest_user_text(self, messages: List[AgentMessage]) -> str:
         for message in reversed(messages):
@@ -109,11 +129,16 @@ class AgentOrchestrator:
         proposal = self._propose(messages, config)
         tool_context = None
         used_tool: Optional[str] = None
+        maintenance_alert: Optional[str] = None
 
         if proposal.tool_call is not None:
             used_tool = proposal.tool_call.tool
             analytics_result = self.analytics_agent.execute(proposal.tool_call)
             tool_context = analytics_result.raw_result
+
+            assessment = self.pdm_agent.assess(used_tool, tool_context)
+            if assessment.is_urgent:
+                maintenance_alert = assessment.reason
 
             follow_up = [
                 *messages,
@@ -123,5 +148,6 @@ class AgentOrchestrator:
             proposal = self._propose(follow_up, config)
 
         self.verifier_agent.verify(proposal.raw_text, tool_context=tool_context)
+        self.safety_agent.audit(proposal.raw_text)
 
-        return OrchestratorResult(text=proposal.raw_text, used_tool=used_tool)
+        return OrchestratorResult(text=proposal.raw_text, used_tool=used_tool, maintenance_alert=maintenance_alert)

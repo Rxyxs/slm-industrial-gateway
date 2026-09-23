@@ -21,7 +21,9 @@ por la capa de API a través de un pipeline multi-agente:
                         ┌───────────────▼─────────────────┐
                         │  src/agents (AgentOrchestrator)   │
                         │  RouterAgent -> AnalyticsAgent     │
-                        │  (si aplica) -> VerifierAgent      │
+                        │  (+PdMAgent, advisor) -> Verifier- │
+                        │  Agent -> SafetyComplianceAgent    │
+                        │  (bloqueante)                      │
                         └────┬──────────────┬──────────┬────┘
                              ▼               ▼          ▼
                    ┌───────────────┐ ┌──────────────┐ ┌──────────────────┐
@@ -63,11 +65,15 @@ flowchart LR
     Router -- texto en lenguaje natural --> Verifier
     Router -- tool call JSON --> Analytics["AnalyticsAgent<br/>DuckDB / Z-score / RUL"]
     Analytics -- SQL peligroso o tool invalida --> Err400b["HTTP 400"]
-    Analytics -- resultado OK --> Router2["RouterAgent<br/>segunda pasada"]
+    Analytics -- resultado OK --> PdM["PdMAgent<br/>interpreta RUL/anomalía, advisor"]
+    PdM -.->|si urgente| MaintAlert["maintenance_alert<br/>(metadata, no bloquea)"]
+    PdM --> Router2["RouterAgent<br/>segunda pasada"]
     Router2 --> Verifier{"VerifierAgent<br/>formato + fidelidad numérica"}
     Verifier -- vacio/invalido (modelo) --> Err500["HTTP 500"]
     Verifier -- tool-call sin resolver o<br/>valor no sustentado --> Err400c["HTTP 400"]
-    Verifier -- valido y fiel --> Response(["Respuesta HTTP<br/>contrato OpenAI"])
+    Verifier -- valido y fiel --> Safety{"SafetyComplianceAgent<br/>límites físicos de diseño"}
+    Safety -- valor fuera de límite --> Err400d["HTTP 400<br/>SAFETY_ALERT"]
+    Safety -- dentro de límites --> Response(["Respuesta HTTP<br/>contrato OpenAI"])
 ```
 
 1. **Validación de entrada**: Pydantic valida el payload (`ChatCompletionRequest`);
@@ -93,10 +99,17 @@ flowchart LR
    contra el `args_schema` de la tool y —para `query_duckdb`— además contra
    `validate_sql_query` (`src/guardrails`): solo se permiten
    `SELECT/WITH/EXPLAIN/DESCRIBE/SHOW`, una única sentencia, sin palabras
-   clave destructivas. El resultado se inyecta como un mensaje de rol `tool`
-   y se vuelve a invocar al `RouterAgent` para que redacte la respuesta final
-   con ese contexto (un único hop: si el SLM pide otra tool en esta segunda
-   pasada, el `VerifierAgent` la rechaza en el paso 4 en vez de encadenar).
+   clave destructivas. Si la tool fue `calculate_rul` o `sensor_anomaly_check`,
+   `PdMAgent.assess()` (`src/agents/pdm_agent.py`) interpreta el resultado
+   crudo contra un umbral de urgencia fijo (RUL ≤ 24h, o ≥ 2 lecturas
+   anómalas) y, si corresponde, adjunta `maintenance_alert` al resultado
+   final — **advisor, no bloqueante**: un RUL bajo es información operativa
+   para planificar mantenimiento, no una condición insegura que deba impedir
+   la respuesta. El resultado de la tool se inyecta como un mensaje de rol
+   `tool` y se vuelve a invocar al `RouterAgent` para que redacte la
+   respuesta final con ese contexto (un único hop: si el SLM pide otra tool
+   en esta segunda pasada, el `VerifierAgent` la rechaza en el paso 4 en vez
+   de encadenar).
 4. **VerifierAgent**: antes de responder, rechaza (`500`, `GenerationError`)
    una respuesta final vacía o de tipo inválido —una falla del modelo, no de
    contenido—; rechaza (`400`) una respuesta final que en realidad es un
@@ -109,7 +122,16 @@ flowchart LR
    corre offline/batch. Cualquier otro error de guardrail o de ejecución de
    tool (SQL peligroso, tool desconocida, argumentos inválidos) también se
    traduce a `400`.
-5. **Respuesta JSON**: se devuelve un `ChatCompletionResponse` con el mismo
+5. **SafetyComplianceAgent**: la última puerta, después de que `VerifierAgent`
+   ya aprobó el texto final. Audita cada valor numérico con unidad
+   (potencia MW, presión PSI, temperatura °C) mencionado en la respuesta
+   contra una matriz FIJA de límites de diseño físico del sitio
+   (`OPERATIONAL_LIMITS`, `src/agents/safety_agent.py`) — inmutable en
+   runtime, sin variable de entorno que la relaje. Si algún valor supera su
+   límite, lanza `SafetyAlertError` (`SAFETY_ALERT`) y la respuesta **nunca**
+   llega al cliente, ni siquiera parcialmente; `src/api` lo traduce a `400`
+   igual que el resto de los `GuardrailError`.
+6. **Respuesta JSON**: se devuelve un `ChatCompletionResponse` con el mismo
    contrato que la API de OpenAI, y se registran métricas de Prometheus
    (tokens generados, latencia por token, resultado de la solicitud).
 
@@ -118,26 +140,61 @@ escritura ni comandos del sistema.
 
 ## Benchmarks
 
-> **Los números de esta sección son ilustrativos, no una medición real.** Este
-> repositorio no tiene GPU ni un modelo GGUF cargado, así que todavía no hay
-> una corrida real de `src/engine/benchmarks.run_benchmark` sobre FP16/Q8_0/
-> Q4_K_M, ni una corrida real de `src/evaluation.FaithfulnessEvaluator` contra
-> el agente. Los valores existen para dejar lista la infraestructura de
-> reporte (`scripts/generate_plots.py`); hay que reemplazarlos por resultados
-> reales antes de citarlos como medición de rendimiento.
+### Benchmark Real en Entorno Edge / CPU x86_64 (Qwen2.5-1.5B Q4_K_M)
+
+Medido de verdad, no un placeholder: `Qwen/Qwen2.5-1.5B-Instruct-GGUF`
+(`qwen2.5-1.5b-instruct-q4_k_m.gguf`, ~1.04 GB) descargado con
+`huggingface_hub`, corrido con `python -m src.engine.benchmarks
+--model-path data/models/model.gguf` sobre **CPU forzada explícitamente**
+(`n_gpu_layers=0`, ver `_run_cli` en `src/engine/benchmarks.py`) -- este
+equipo no tiene GPU dedicada, así que no hay ninguna cifra de GPU en esta
+sección, medida ni estimada.
 
 ![Quantization Benchmark](outputs/reports/quant_benchmark.png)
 
-| Cuantización | VRAM aprox. (7B) | TTFT (ms) | Throughput (tok/s) |
-|--------------|-----------------:|----------:|--------------------:|
-| FP16         | ~14 GB           | 180       | 22                   |
-| Q8_0         | ~7.5 GB          | 95        | 38                   |
-| Q4_K_M       | ~4.5 GB          | 60        | 54                   |
+| Métrica | Valor (última corrida) | Rango sobre 5 corridas |
+|---|---:|---:|
+| TTFT | 4,709 ms | 3,431 – 4,736 ms |
+| Throughput | 8.11 tok/s | 5.50 – 8.11 tok/s |
+| RAM residente (RSS) | 1,144 MB | 1,143.5 – 1,144.4 MB |
+| VRAM | N/A | sin GPU dedicada; forzado a CPU |
 
-*VRAM aproximada para un modelo de 7B según el tamaño de archivo GGUF típico
-de cada cuantización; TTFT y throughput son los mismos valores ilustrativos
-del gráfico. Medir con `scripts/quantize.py --load` + `run_benchmark` sobre
-el hardware real de destino.*
+*Hardware: AMD Ryzen 5 2500U (4 núcleos / 8 hilos, sin GPU dedicada), Windows.
+Prompt de 128 tokens de salida máx. (ver `DEFAULT_BENCHMARK_PROMPT`),
+`n_threads` autodetectado por llama.cpp. El rango viene de 5 corridas
+independientes en la misma máquina, no de una sola medición: TTFT varió
+~38% entre la corrida más rápida y la más lenta, y el throughput ~47% --
+varianza real de un laptop compartido con otros procesos, no de una GPU/CPU
+de benchmarking dedicada, y se reporta así en vez de citar solo la corrida
+más favorable. El archivo completo de la última corrida (la que grafica la
+imagen de arriba) queda versionado en
+[`outputs/reports/benchmark_result.json`](outputs/reports/benchmark_result.json)
+para que cualquiera pueda verificar el número exacto sin volver a correr el
+benchmark.*
+
+Para reproducir:
+
+```bash
+python -m huggingface_hub download Qwen/Qwen2.5-1.5B-Instruct-GGUF \
+    qwen2.5-1.5b-instruct-q4_k_m.gguf --local-dir data/models
+cp data/models/qwen2.5-1.5b-instruct-q4_k_m.gguf data/models/model.gguf
+
+python -m src.engine.benchmarks --model-path data/models/model.gguf \
+    --model-label "Qwen2.5-1.5B-Instruct Q4_K_M"
+
+python scripts/generate_plots.py   # regenera quant_benchmark.png desde el JSON guardado
+```
+
+### Métricas de evaluación del agente
+
+> **Los números de esta sub-sección siguen siendo ilustrativos.** A
+> diferencia del benchmark de arriba, correr `src/evaluation.FaithfulnessEvaluator`
+> de verdad requiere un modelo juez externo (por defecto `gpt-4o-mini` vía
+> API) que este comando no invoca -- no es un límite de CPU/GPU sino de
+> credenciales de red, fuera del alcance de esta corrida. Reemplazar estos
+> valores exige correr el evaluador aparte sobre un set de prueba real, más
+> las tasas de SQL Safety / JSON Validity de `src.guardrails` sobre intentos
+> de dispatch de tools registrados.
 
 ![Eval Metrics](outputs/reports/eval_metrics.png)
 
@@ -148,8 +205,10 @@ el hardware real de destino.*
 | SQL Safety Rate      | 1.00  | Fracción de intentos de `query_duckdb` con SQL peligroso correctamente bloqueados por `validate_sql_query`. |
 | JSON Validity        | 0.97  | Fracción de tool calls emitidas por el SLM que parsean como `ToolCallEnvelope` sin error de esquema. |
 
-Para regenerar ambos gráficos (con los mismos placeholders u otros datos ya
-editados en el script):
+Para regenerar ambos gráficos: el de cuantización lee
+`outputs/reports/benchmark_result.json` si existe (la corrida real de arriba)
+y cae al placeholder ilustrativo si no; el de métricas de evaluación sigue
+siendo siempre el placeholder.
 
 ```bash
 python scripts/generate_plots.py
@@ -159,11 +218,13 @@ python scripts/generate_plots.py
 
 ```
 src/
-  engine/       LLMServer (GGUF/llama.cpp), benchmarks (t/s, TTFT, RAM/VRAM)
+  engine/       LLMServer (GGUF/llama.cpp), benchmarks (CLI real: t/s, TTFT, RAM/VRAM)
   api/          Gateway FastAPI, contrato OpenAI, métricas Prometheus
   agents/       Pipeline multi-agente: RouterAgent -> AnalyticsAgent (si
-                aplica) -> VerifierAgent (fidelidad numérica + formato,
-                heurística local sin red, en cada solicitud)
+                aplica, con evaluación PdMAgent advisor) -> VerifierAgent
+                (fidelidad numérica + formato) -> SafetyComplianceAgent
+                (límites físicos, bloqueante) -- los cuatro, locales y sin
+                red en cada solicitud
   tools/        ToolRegistry, herramientas industriales (query_duckdb,
                 sensor_anomaly_check, calculate_rul)
   guardrails/   Validación de SQL y de salidas JSON estrictas
@@ -176,14 +237,15 @@ scripts/
   quantize.py       Verifica/carga modelos GGUF cuantizados (Q4_K_M, Q8_0)
   generate_plots.py Genera los gráficos de `outputs/reports/` (ver Benchmarks)
 outputs/
-  reports/        Gráficos versionados que embeben el README (PNG)
+  reports/        Gráficos versionados que embeben el README (PNG), más
+                   benchmark_result.json (última corrida real de CPU)
 monitoring/
   prometheus.yml  Configuración de scraping para el contenedor Prometheus
 tests/
   test_engine.py, test_api.py, test_agents.py, test_router_agent.py,
-  test_analytics_agent.py, test_tools.py, test_guardrails.py, test_eval.py,
-  test_training.py, test_integration.py, y otras suites de agentes en
-  desarrollo paralelo (ver `pytest -v` para el listado completo y vigente)
+  test_analytics_agent.py, test_pdm_agent.py, test_safety_agent.py,
+  test_tools.py, test_guardrails.py, test_eval.py, test_training.py,
+  test_integration.py (ver `pytest -v` para el listado completo y vigente)
 ```
 
 ## Guía de despliegue air-gapped
@@ -319,6 +381,8 @@ pytest tests/test_api.py -v           # Contrato HTTP, LLM mockeado
 pytest tests/test_agents.py -v        # AnalyticsAgent/VerifierAgent + AgentOrchestrator + API end-to-end
 pytest tests/test_router_agent.py -v  # RouterAgent: guardrail de entrada + clasificación de intención
 pytest tests/test_analytics_agent.py -v  # AnalyticsAgent en aislamiento (dispatch real, SQL peligroso)
+pytest tests/test_pdm_agent.py -v     # PdMAgent: interpretación de RUL/anomalía, advisor (nunca lanza)
+pytest tests/test_safety_agent.py -v  # SafetyComplianceAgent: límites físicos de diseño, bloqueante
 pytest tests/test_tools.py -v         # Tools industriales + ToolRegistry
 pytest tests/test_guardrails.py -v    # Validación de SQL y de JSON de salida
 pytest tests/test_eval.py -v          # Evaluador de fidelidad (métricas mockeadas)
@@ -364,3 +428,10 @@ que el nuevo rango sigue siendo compatible.
   de números, no un LLM juez) pensada como red de seguridad en tiempo real;
   no reemplaza al `FaithfulnessMetric` de DeepEval (`src/evaluation`), que es
   más riguroso pero solo corre offline/batch.
+- **Límites físicos de diseño (`SafetyComplianceAgent`)**: última puerta del
+  pipeline, después de `VerifierAgent`. Rechaza cualquier respuesta final que
+  proponga un valor de potencia, presión o temperatura por encima del límite
+  de diseño fijo del sitio (`OPERATIONAL_LIMITS`, inmutable en runtime, sin
+  variable de entorno que lo relaje) — la respuesta nunca llega al cliente,
+  ni parcialmente. No confundir con `PdMAgent`: ese es advisor (adjunta
+  `maintenance_alert` sin bloquear nada), este bloquea.
