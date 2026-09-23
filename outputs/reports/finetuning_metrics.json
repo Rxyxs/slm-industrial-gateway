@@ -1,0 +1,51 @@
+{
+  "generated_at_utc": "2026-09-23T11:38:05.875678+00:00",
+  "task": "QLoRA fine-tuning sobre dataset sintetico industrial",
+  "dataset": {
+    "path": "C:\\Users\\preye\\OneDrive\\Escritorio\\slm-industrial-gateway\\data\\domain_dataset\\industrial_instructions.json",
+    "n_examples": 35,
+    "n_sft_rows": 35,
+    "has_system_prompt_in_all_examples": true,
+    "status": "ok"
+  },
+  "training_config": {
+    "model_name": "unsloth/llama-3-8b-bnb-4bit",
+    "load_in_4bit": true,
+    "bnb_4bit_quant_type": "nf4",
+    "lora_r": 16,
+    "lora_alpha": 16,
+    "lora_target_modules": [
+      "q_proj",
+      "k_proj",
+      "v_proj",
+      "o_proj",
+      "gate_proj",
+      "up_proj",
+      "down_proj"
+    ],
+    "num_train_epochs": 3,
+    "per_device_train_batch_size": 2,
+    "learning_rate": 0.0002,
+    "resolved_precision": "fp32 (sin GPU)",
+    "status": "ok"
+  },
+  "environment": {
+    "python_version": "3.10.11",
+    "platform": "Windows-10-10.0.19045-SP0",
+    "torch_version": "2.12.1+cpu",
+    "cuda_available": false,
+    "unsloth_installed": false,
+    "bitsandbytes_installed": false
+  },
+  "training": {
+    "status": "blocked_no_gpu",
+    "stage_reached": "load_base_model_and_tokenizer",
+    "error_type": "ImportError",
+    "error_message": "Unsloth no está instalado o no hay GPU CUDA disponible. Instala 'unsloth' y 'bitsandbytes' en un entorno con GPU para ejecutar el entrenamiento QLoRA real.",
+    "loss_metrics": null,
+    "perplexity_before": null,
+    "perplexity_after": null,
+    "adapter_saved": false,
+    "how_to_complete": "Correr este mismo script (o src/training/finetune.py:run_training) en una maquina con GPU CUDA y 'unsloth'+'bitsandbytes' instalados (ver requirements.txt, seccion 'Fine-tuning QLoRA'). El adaptador quedaria en outputs\\adapters\\industrial_qlora y este JSON se regeneraria con loss de entrenamiento/validacion real y perplexity inicial vs. final medidos, no estimados."
+  }
+}
