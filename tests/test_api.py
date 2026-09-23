@@ -219,3 +219,80 @@ def test_pdm_diagnose_multi_metric_picks_worst_as_bottleneck() -> None:
     assert body["overall_status"] == "critical"
     assert body["bottleneck_metric"] == "vibration"
     assert len(body["metric_diagnoses"]) == 2
+
+
+# --------------------------------------------------------------------------- #
+# Formato de error uniforme, request_id y red de seguridad para excepciones
+# no capturadas -- ver `request_context_middleware`/`unhandled_exception_handler`.
+# --------------------------------------------------------------------------- #
+
+
+def test_error_response_has_uniform_error_and_type_shape() -> None:
+    response = client.post("/v1/chat/completions", json={"model": "local-slm", "messages": []})
+
+    assert response.status_code == 400
+    body = response.json()
+    assert set(body.keys()) == {"error", "type"}
+    assert body["type"] == "ValueError"
+    assert "detail" not in body  # no el shape por defecto de FastAPI
+
+
+def test_model_load_error_response_has_uniform_shape_with_real_type() -> None:
+    payload = {"model": "local-slm", "messages": [{"role": "user", "content": "hola"}]}
+
+    with patch("src.api.routes.get_llm_server", side_effect=ModelLoadError("sin modelo")):
+        response = client.post("/v1/chat/completions", json=payload)
+
+    assert response.status_code == 503
+    body = response.json()
+    assert body == {"error": "sin modelo", "type": "ModelLoadError"}
+
+
+def test_pdm_diagnose_error_response_has_uniform_shape() -> None:
+    response = client.post("/v1/pdm/diagnose", json={"asset_id": "SAG-99", "series": []})
+
+    assert response.status_code == 400
+    body = response.json()
+    assert set(body.keys()) == {"error", "type"}
+    assert body["type"] == "ValueError"
+
+
+def test_response_carries_a_request_id_header() -> None:
+    response = client.get("/health")
+
+    assert "x-request-id" in {k.lower() for k in response.headers}
+
+
+def test_request_id_from_client_is_echoed_back() -> None:
+    response = client.get("/health", headers={"X-Request-ID": "client-supplied-id-123"})
+
+    assert response.headers["x-request-id"] == "client-supplied-id-123"
+
+
+def test_two_requests_without_a_client_id_get_different_request_ids() -> None:
+    first = client.get("/health").headers["x-request-id"]
+    second = client.get("/health").headers["x-request-id"]
+
+    assert first != second
+
+
+def test_unhandled_exception_returns_clean_json_500_not_a_traceback_page() -> None:
+    """Un error que ningun `except` especifico del endpoint atrapa (acá,
+    forzado dentro del propio orquestador) no debe tumbar la respuesta en la
+    pagina de traceback por defecto de Starlette -- debe quedar en el mismo
+    formato uniforme que cualquier otro error del gateway.
+
+    `raise_server_exceptions=False`: el `ServerErrorMiddleware` de Starlette
+    manda la respuesta del handler al cliente y DESPUES re-lanza la excepcion
+    (para que el logging del servidor ASGI real -- uvicorn -- la vea); con el
+    TestClient por defecto esa re-elevación llega tal cual al test, en vez de
+    dejar inspeccionar la respuesta que un cliente real sí recibió."""
+    local_client = TestClient(app, raise_server_exceptions=False)
+    payload = {"model": "local-slm", "messages": [{"role": "user", "content": "hola"}]}
+
+    with patch("src.api.routes.get_llm_server", side_effect=RuntimeError("fallo inesperado no mapeado")):
+        response = local_client.post("/v1/chat/completions", json=payload)
+
+    assert response.status_code == 500
+    body = response.json()
+    assert body == {"error": "Error interno del servidor.", "type": "RuntimeError"}

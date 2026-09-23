@@ -237,6 +237,21 @@ medición y no deben citarse como tal:
 
 ### Evaluación offline del agente (medición real, 100 prompts)
 
+**Resumen ejecutivo (detalle completo más abajo):**
+
+1. **Brecha de tool-calling en el modelo base de 1.5B**: 94/100 prompts se
+   bloquearon por argumentos de tool inválidos (nombres de campo
+   alucinados), no por diseño de seguridad -- el argumento más concreto que
+   tiene este repositorio a favor de correr su propio pipeline de
+   fine-tuning QLoRA (`src/training/`) antes de producción real.
+2. **El "Safety Block Rate" ingenuo esconde más de lo que muestra**: de 25
+   prompts diseñados para exceder un límite físico, solo 1 disparó un
+   `SafetyAlertError` genuino; el resto se bloqueó antes, por el mismo
+   problema del hallazgo 1. Se identificó y reprodujo además un límite real
+   de `SafetyComplianceAgent`: JSON malformado puede colarse como respuesta
+   "final" sin que su regex detecte el valor peligroso si no queda pegado a
+   la unidad.
+
 ```bash
 python scripts/build_eval_prompts.py     # genera data/eval_prompts.json (100 prompts, 4 categorías)
 python -m src.evaluation.run_offline_eval  # corre el agente real sobre los 100 -> outputs/reports/eval_metrics.json
@@ -551,3 +566,50 @@ que el nuevo rango sigue siendo compatible.
   `maintenance_alert` sin bloquear nada) ni con `PdMAgent` (diagnóstico
   explícito vía `/v1/pdm/diagnose`, fuera del pipeline de chat) — de los tres,
   solo `SafetyComplianceAgent` bloquea.
+
+## Resiliencia operativa
+
+- **Formato de error uniforme**: toda respuesta de error del gateway, sin
+  excepción, tiene la forma `{"error": "<mensaje>", "type": "<NombreDeLa
+  Excepcion>"}` — nunca el `{"detail": "..."}` por defecto de FastAPI. Cada
+  `except` de `src/api/routes.py` levanta `HTTPException(detail={"error":...,
+  "type":...})`, y `http_exception_handler` aplana ese `detail` al body de la
+  respuesta en vez de anidarlo una vuelta más.
+- **Red de seguridad para excepciones no mapeadas**: `unhandled_exception_handler`
+  (`@app.exception_handler(Exception)`) atrapa cualquier error que ningún
+  `except` específico haya previsto, lo loguea con su `request_id` y devuelve
+  el mismo formato uniforme en vez de la página de traceback por defecto de
+  Starlette — verificado con un error forzado que ningún handler del endpoint
+  mapea (`tests/test_api.py::test_unhandled_exception_returns_clean_json_500_not_a_traceback_page`).
+- **Logging estructurado**: `request_context_middleware` asigna un
+  `request_id` por solicitud (hereda `X-Request-ID` si el cliente ya mandó
+  uno; si no, genera un UUID), lo devuelve en la respuesta, y loguea inicio y
+  fin de cada solicitud como una línea JSON (`JSONLogFormatter`) con
+  timestamp, nivel, mensaje y `request_id` — sin depender de una librería de
+  logging externa. Verificado corriendo el servidor real (`uvicorn`), no solo
+  con `TestClient`.
+- **Rate limiting: documentado, no implementado.** Este gateway no impone
+  ningún límite de tasa por sí mismo. Para un despliegue real, la recomendación
+  es un proxy inverso delante (nginx `limit_req`, Envoy, o el rate limiting
+  nativo del API Gateway/Ingress que ya exista en el clúster) en vez de
+  agregarlo acá: es responsabilidad de la capa de red, no del servicio, y
+  agregar una dependencia nueva (`slowapi`, etc.) solo para esto no se
+  justificaba en el alcance de esta semana.
+
+## Production Readiness Checklist
+
+Cada fila se verificó de verdad antes de marcarse -- dos se corrigieron
+respecto al plan original porque el número/alcance ahí no coincidía con el
+estado real del repositorio (ver la nota de cada una).
+
+| # | Ítem | Estado | Nota |
+|---|------|:------:|------|
+| 1 | CI/CD automatizado (GitHub Actions) | ✅ | `.github/workflows/ci.yml`, push/PR a `master`/`main`, `pytest -v` real -- **317 tests**, no "310+": recontado en esta corrida, no copiado del día anterior. |
+| 2 | Motor GGUF local en CPU, desacoplado | ✅ | `src/engine/LLMServer`, `n_gpu_layers=0` forzable explícitamente, sin acoplar a `src/api`/`src/agents`. |
+| 3 | Pipeline de agentes especializados | ✅ | **6, no 5**: `RouterAgent`, `AnalyticsAgent`, `VerifierAgent`, `MaintenanceAdvisorAgent`, `SafetyComplianceAgent`, `PdMAgent`. El plan original preveía 5 (Router/Analytics/Verifier/PdM/Safety); terminaron siendo 6 porque dos sesiones en paralelo construyeron implementaciones independientes y válidas de "el agente de mantenimiento predictivo" (ver historial de commits) y se conservaron ambas en vez de descartar una. |
+| 4 | Guardrails de entrada + fidelidad de salida | ✅ | `RouterAgent.check_threat` (entrada) + `VerifierAgent` (fidelidad numérica de salida) + `SafetyComplianceAgent` (límites físicos) + validación Pydantic estricta en cada tool. |
+| 5 | Evaluador offline de alucinaciones | ⚠️ Parcial | Lo que corre de verdad y sin judge externo es `run_offline_eval.py` (Safety Block Rate desglosado, 100 prompts reales). El `FaithfulnessMetric`/`AnswerRelevancyMetric` de DeepEval — la medición de alucinación propiamente dicha — sigue sin correr: necesita `OPENAI_API_KEY`, no disponible en este entorno. No se marca ✅ completo para no sobre-representarlo. |
+| 6 | Pipeline de fine-tuning QLoRA verificado (CPU dry-run) | ✅ | `scripts/verify_finetuning_pipeline.py` + `tests/test_training.py`: dataset, `QLoRATrainingConfig`, `SFTConfig` construyen y validan sin GPU; `load_base_model_and_tokenizer` falla con un `ImportError` claro y esperado sin GPU/unsloth (verificado también en CI, Linux). Es un dry-run verificado, no un checkpoint entrenado -- ese paso sigue pendiente y requiere GPU real. |
+| 7 | Endpoints FastAPI + métricas Prometheus | ✅ | `/v1/chat/completions`, `/v1/pdm/diagnose`, `/v1/models`, `/health`, `/metrics` (Prometheus vía `prometheus-fastapi-instrumentator` + métricas propias de tokens/latencia). |
+| 8 | Manejo de errores uniforme + logging estructurado | ✅ | Agregado esta semana: `{"error", "type"}` en toda respuesta de error, handler de excepciones no mapeadas, logging JSON con `request_id` por solicitud (ver "Resiliencia operativa" arriba). |
+| 9 | Rate limiting | ⬜ No implementado | Documentado como decisión deliberada (delegado a un proxy inverso), no como un olvido -- ver "Resiliencia operativa" arriba. |

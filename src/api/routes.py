@@ -17,17 +17,31 @@ chat. Recibe series de condición estructuradas (vibración/temperatura/carga)
 y devuelve un diagnóstico multi-métrica vía `PdMAgent.diagnose()` -- para un
 cliente que ya sabe qué quiere diagnosticar, no para una conversación.
 
-Incluye métricas de Prometheus para latencia por token y throughput.
+Incluye métricas de Prometheus para latencia por token y throughput, logging
+estructurado en JSON con un `request_id` por solicitud (ver
+`request_context_middleware`), y un formato de error uniforme en todo el
+gateway: toda respuesta de error, venga de donde venga, es
+`{"error": "<mensaje>", "type": "<NombreDeLaExcepcion>"}` -- nunca el
+`{"detail": "..."}` por defecto de FastAPI ni una traza cruda de Python
+(`unhandled_exception_handler` es la red de seguridad final para lo que
+ningún `except` específico atrapó).
+
+Rate limiting: no implementado en este gateway. Ver
+"Configuración (variables de entorno)" más abajo en el README para el
+razonamiento y la opción recomendada (proxy inverso) en vez de agregarlo acá.
 """
 
 from __future__ import annotations
 
+import json
+import logging
 import os
 import time
 import uuid
-from typing import Literal, Optional
+from typing import Any, Literal, Optional
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import JSONResponse
 from prometheus_client import Counter, Histogram
 from prometheus_fastapi_instrumentator import Instrumentator
 from pydantic import BaseModel
@@ -44,8 +58,100 @@ MODEL_NAME = os.environ.get("MODEL_NAME", "local-slm")
 MODEL_PATH = os.environ.get("MODEL_PATH", "data/models/model.gguf")
 MODEL_N_CTX = int(os.environ.get("MODEL_N_CTX", "4096"))
 
+
+class JSONLogFormatter(logging.Formatter):
+    """Un renglón JSON por evento -- timestamp, nivel, mensaje y `request_id`
+    si el log vino de una solicitud HTTP (ver `request_context_middleware`).
+    Sin dependencias externas (`python-json-logger`, etc.): el formato es
+    chico y no vale la pena una dependencia nueva solo para esto."""
+
+    def format(self, record: logging.LogRecord) -> str:
+        payload: dict[str, Any] = {
+            "timestamp": self.formatTime(record, "%Y-%m-%dT%H:%M:%S%z"),
+            "level": record.levelname,
+            "logger": record.name,
+            "message": record.getMessage(),
+        }
+        request_id = getattr(record, "request_id", None)
+        if request_id is not None:
+            payload["request_id"] = request_id
+        if record.exc_info:
+            payload["exception"] = self.formatException(record.exc_info)
+        return json.dumps(payload, ensure_ascii=False)
+
+
+def _configure_logging() -> logging.Logger:
+    logger = logging.getLogger("slm_gateway")
+    if not logger.handlers:  # evita duplicar el handler si el módulo se reimporta (tests)
+        handler = logging.StreamHandler()
+        handler.setFormatter(JSONLogFormatter())
+        logger.addHandler(handler)
+        logger.setLevel(logging.INFO)
+        logger.propagate = False
+    return logger
+
+
+logger = _configure_logging()
+
 app = FastAPI(title=APP_NAME, version=APP_VERSION)
 Instrumentator().instrument(app).expose(app, endpoint="/metrics")
+
+
+@app.middleware("http")
+async def request_context_middleware(request: Request, call_next):
+    """Asigna un `request_id` (heredado de `X-Request-ID` si el cliente ya
+    mandó uno, para que un proxy/gateway upstream pueda correlacionar sus
+    propios logs con los de acá), lo expone en `request.state.request_id`
+    para que los handlers y `unhandled_exception_handler` lo usen, lo agrega
+    a la respuesta, y deja un log de inicio/fin con la duración real."""
+    request_id = request.headers.get("X-Request-ID", uuid.uuid4().hex)
+    request.state.request_id = request_id
+    start = time.perf_counter()
+
+    logger.info(
+        f"request_started method={request.method} path={request.url.path}",
+        extra={"request_id": request_id},
+    )
+    response = await call_next(request)
+    elapsed_ms = (time.perf_counter() - start) * 1000
+
+    response.headers["X-Request-ID"] = request_id
+    logger.info(
+        f"request_finished method={request.method} path={request.url.path} "
+        f"status_code={response.status_code} duration_ms={elapsed_ms:.1f}",
+        extra={"request_id": request_id},
+    )
+    return response
+
+
+@app.exception_handler(HTTPException)
+async def http_exception_handler(request: Request, exc: HTTPException) -> JSONResponse:
+    """Aplana `HTTPException(detail={"error":..., "type":...})` a esa misma
+    forma en el body -- sin esto, el handler por defecto de FastAPI la anida
+    una vuelta más, como `{"detail": {"error": ..., "type": ...}}`."""
+    detail = exc.detail
+    if isinstance(detail, dict) and "error" in detail and "type" in detail:
+        content = detail
+    else:
+        content = {"error": str(detail), "type": "HTTPException"}
+    return JSONResponse(status_code=exc.status_code, content=content, headers=dict(exc.headers or {}))
+
+
+@app.exception_handler(Exception)
+async def unhandled_exception_handler(request: Request, exc: Exception) -> JSONResponse:
+    """Red de seguridad final: cualquier excepción que ningún `except`
+    específico haya atrapado todavía se responde como JSON limpio (nunca la
+    página de traceback por defecto de Starlette) y queda logueada con el
+    `request_id` para poder correlacionarla después."""
+    request_id = getattr(request.state, "request_id", None)
+    logger.exception(
+        f"unhandled_exception method={request.method} path={request.url.path}",
+        extra={"request_id": request_id},
+    )
+    return JSONResponse(
+        status_code=500,
+        content={"error": "Error interno del servidor.", "type": type(exc).__name__},
+    )
 
 # Métricas de negocio: el instrumentator de arriba ya cubre latencia/conteo HTTP
 # genérico; estas métricas propias miden lo específico de la generación del SLM.
@@ -236,7 +342,7 @@ def diagnose_asset(request: PdMDiagnoseRequest) -> PdMDiagnoseResponse:
     try:
         diagnosis = agent.diagnose(request.asset_id, series)
     except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+        raise HTTPException(status_code=400, detail={"error": str(exc), "type": type(exc).__name__}) from exc
 
     return PdMDiagnoseResponse(
         asset_id=diagnosis.asset_id,
@@ -263,7 +369,9 @@ def diagnose_asset(request: PdMDiagnoseRequest) -> PdMDiagnoseResponse:
 @app.post("/v1/chat/completions", response_model=ChatCompletionResponse)
 def create_chat_completion(request: ChatCompletionRequest) -> ChatCompletionResponse:
     if not request.messages:
-        raise HTTPException(status_code=400, detail="messages no puede estar vacío")
+        raise HTTPException(
+            status_code=400, detail={"error": "messages no puede estar vacío", "type": "ValueError"}
+        )
 
     default_max_tokens = GenerationConfig().max_tokens
     config = GenerationConfig(
@@ -281,19 +389,19 @@ def create_chat_completion(request: ChatCompletionRequest) -> ChatCompletionResp
         completion_text = result.text
     except ModelLoadError as exc:
         COMPLETION_REQUESTS_TOTAL.labels(model=request.model, status="error").inc()
-        raise HTTPException(status_code=503, detail=str(exc)) from exc
+        raise HTTPException(status_code=503, detail={"error": str(exc), "type": type(exc).__name__}) from exc
     except ValueError as exc:
         COMPLETION_REQUESTS_TOTAL.labels(model=request.model, status="error").inc()
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+        raise HTTPException(status_code=400, detail={"error": str(exc), "type": type(exc).__name__}) from exc
     except GenerationError as exc:
         COMPLETION_REQUESTS_TOTAL.labels(model=request.model, status="error").inc()
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
+        raise HTTPException(status_code=500, detail={"error": str(exc), "type": type(exc).__name__}) from exc
     except ToolNotFoundError as exc:
         COMPLETION_REQUESTS_TOTAL.labels(model=request.model, status="error").inc()
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+        raise HTTPException(status_code=400, detail={"error": str(exc), "type": type(exc).__name__}) from exc
     except (ToolExecutionError, GuardrailError) as exc:
         COMPLETION_REQUESTS_TOTAL.labels(model=request.model, status="error").inc()
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+        raise HTTPException(status_code=400, detail={"error": str(exc), "type": type(exc).__name__}) from exc
     elapsed = time.perf_counter() - start
 
     prompt_tokens = sum(_count_tokens(message.content) for message in request.messages)
