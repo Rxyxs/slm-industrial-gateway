@@ -1,5 +1,7 @@
 # SLM Industrial Gateway
 
+[![CI Pipeline](https://github.com/Rxyxs/slm-industrial-gateway/actions/workflows/ci.yml/badge.svg)](https://github.com/Rxyxs/slm-industrial-gateway/actions)
+
 Gateway HTTP compatible con OpenAI para un modelo de lenguaje pequeño (SLM)
 adaptado por dominio a jerga industrial y minera, con ejecución de
 herramientas analíticas (DuckDB, detección de anomalías, cálculo de RUL) y
