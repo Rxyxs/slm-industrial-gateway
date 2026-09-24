@@ -17,6 +17,12 @@ htmlcov/
 build/
 dist/
 
+# Binarios compilados
+*.so
+*.dylib
+*.dll
+*.exe
+
 # Configuración local / secretos
 .env
 .env.*
