@@ -474,11 +474,22 @@ simplemente omitir la evaluación de fidelidad en producción: en CI,
 
 ## Ejecutar localmente
 
+El servicio nunca descarga el modelo por red (ver [Guía de despliegue
+air-gapped](#guía-de-despliegue-air-gapped)): `MODEL_PATH` tiene que apuntar a
+un `.gguf` que ya exista en disco -- este repo no lo incluye (pesa GBs, está
+en `.gitignore`). Los benchmarks de este README se midieron con
+**Qwen2.5-3B-Instruct, cuantización Q4_K_M** (buscar `Qwen2.5-3B-Instruct-GGUF`
+en Hugging Face); cualquier GGUF compatible con llama.cpp sirve para levantar
+el servicio.
+
 ```bash
 pip install -r requirements.txt
-export MODEL_PATH=data/models/model.gguf   # o el path real al .gguf
+export MODEL_PATH=data/models/model.gguf   # el .gguf ya tiene que estar ahí
 python -m uvicorn src.api:app --host 0.0.0.0 --port 8000
 ```
+
+Para correr la suite de tests o los agentes sin pesos reales, `LLMServer` se
+simula (ver [Pruebas](#pruebas) abajo) -- no hace falta un `.gguf` para eso.
 
 ## Ejecutar con Docker Compose
 
