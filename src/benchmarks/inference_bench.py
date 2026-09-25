@@ -102,7 +102,7 @@ def prompt_processing_tokens_per_second(prompt_tokens: int, ttft_seconds: float)
     """Tokens/segundo de la fase de prefill (ingesta del prompt): tokens del
     prompt divididos por TTFT. `0.0` (no una excepción) si TTFT es cero o
     negativo o no hay tokens de prompt -- el caso de muestras ultra-rápidas
-    que el Día 8 pide manejar explícitamente sin dividir por cero.
+    que decidí manejar explícitamente sin dividir por cero.
     """
     if ttft_seconds <= 0 or prompt_tokens <= 0:
         return 0.0
@@ -155,7 +155,7 @@ def run_sweep(sweep: SweepConfig) -> dict[str, Any]:
     """Recorre cada combinación de `n_ctx` × `n_threads`: por cada una, carga
     (o simula) el motor una vez, y mide un punto en frío (prefijo nuevo,
     `reset_prompt_cache`) y uno en caliente (mismo prompt, prefijo ya en
-    caché) -- el arranque frío/cálido que pide el Día 8, reusando el mismo
+    caché) -- el arranque frío/cálido, reusando el mismo
     prompt de diagnóstico industrial que usa `run_suite`.
     """
     config = GenerationConfig(max_tokens=sweep.max_tokens, temperature=0.0)
