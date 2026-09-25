@@ -148,6 +148,14 @@ class LLMServer:
             **model_kwargs,
         )
 
+    def count_tokens(self, text: str) -> int:
+        """Cantidad de tokens que produce el tokenizador del modelo para
+        `text`, sin generar nada -- usado por el arnés de benchmarking
+        (`src/benchmarks/inference_bench.py`) para calcular tokens/seg de la
+        fase de prefill (tokens del prompt / TTFT), separado de la
+        velocidad de decodificación."""
+        return len(self._llm.tokenize(text.encode("utf-8")))
+
     def generate(self, prompt: str, config: Optional[GenerationConfig] = None) -> str:
         """Genera texto de forma síncrona y devuelve la respuesta completa.
 
