@@ -19,7 +19,15 @@ try:
 except ImportError:  # pragma: no cover - en tests se sustituye vía mock
     Llama = None  # type: ignore[assignment]
 
+from src.telemetry import trace_stage
+from src.telemetry.logger import STAGE_MODEL_INFERENCE, STAGE_TOKENIZER
+
 logger = logging.getLogger(__name__)
+
+# agent_name de las etapas instrumentadas acá: no son un agente del pipeline
+# (src/agents/), son el motor de inferencia en sí -- lo que `AgentOrchestrator`
+# invoca como una caja negra desde `_propose()`.
+ENGINE_AGENT_NAME = "engine"
 
 DEFAULT_CONTEXT_WINDOW = 4096
 DEFAULT_MAX_TOKENS = 512
@@ -141,24 +149,38 @@ class LLMServer:
         )
 
     def generate(self, prompt: str, config: Optional[GenerationConfig] = None) -> str:
-        """Genera texto de forma síncrona y devuelve la respuesta completa."""
+        """Genera texto de forma síncrona y devuelve la respuesta completa.
+
+        Dos etapas medidas por separado (`src.telemetry.trace_stage`):
+        tokenizar el prompt de entrada (`STAGE_TOKENIZER`) y la llamada real
+        al motor de inferencia (`STAGE_MODEL_INFERENCE`) -- para poder ver,
+        en el log estructurado, cuál de las dos domina la latencia de una
+        solicitud lenta en vez de un único número agregado.
+        """
         if not prompt:
             raise ValueError("El prompt no puede estar vacío.")
 
         cfg = config or GenerationConfig()
-        try:
-            output = self._llm(
-                prompt,
-                max_tokens=cfg.max_tokens,
-                temperature=cfg.temperature,
-                top_p=cfg.top_p,
-                top_k=cfg.top_k,
-                repeat_penalty=cfg.repeat_penalty,
-                stop=cfg.stop or None,
-                stream=False,
-            )
-        except Exception as exc:  # noqa: BLE001
-            raise GenerationError(f"Error durante la generación: {exc}") from exc
+
+        with trace_stage(STAGE_TOKENIZER, ENGINE_AGENT_NAME) as span:
+            prompt_tokens = self._llm.tokenize(prompt.encode("utf-8"))
+            span.token_count = len(prompt_tokens)
+
+        with trace_stage(STAGE_MODEL_INFERENCE, ENGINE_AGENT_NAME) as span:
+            try:
+                output = self._llm(
+                    prompt,
+                    max_tokens=cfg.max_tokens,
+                    temperature=cfg.temperature,
+                    top_p=cfg.top_p,
+                    top_k=cfg.top_k,
+                    repeat_penalty=cfg.repeat_penalty,
+                    stop=cfg.stop or None,
+                    stream=False,
+                )
+            except Exception as exc:  # noqa: BLE001
+                raise GenerationError(f"Error durante la generación: {exc}") from exc
+            span.token_count = output.get("usage", {}).get("completion_tokens")
 
         try:
             return output["choices"][0]["text"]

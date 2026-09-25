@@ -27,6 +27,8 @@ from typing import List, Optional
 
 from src.engine import GenerationConfig, LLMServer
 from src.guardrails.validators import GuardrailError, OutputValidationError, validate_json_output
+from src.telemetry import start_trace, trace_stage
+from src.telemetry.logger import STAGE_POST_PROCESSING
 from src.tools import ToolRegistry
 
 from .analytics_agent import AnalyticsAgent
@@ -129,8 +131,18 @@ class AgentOrchestrator:
         return _Proposal(raw_text=raw_text, tool_call=self._try_parse_tool_call(raw_text))
 
     def run(self, messages: List[AgentMessage], config: GenerationConfig) -> OrchestratorResult:
+        """Un `trace_id` nuevo por solicitud (`start_trace`), y cada paso del
+        pipeline como su propio span -- así un log lento se puede atribuir a
+        una etapa concreta (guardrail, tokenizer/model_inference dentro de
+        `LLMServer.generate`, tool, verificación, auditoría de seguridad) en
+        vez de a "la solicitud" en general.
+        """
+        start_trace()
+
         user_text = self._latest_user_text(messages)
-        threat = self.router_agent.check_threat(user_text) if user_text else None
+        with trace_stage("guardrail_input", "router") as span:
+            threat = self.router_agent.check_threat(user_text) if user_text else None
+            span.status = "fallback" if threat is not None else "ok"
         if threat is not None:
             raise RequestRejectedError(
                 f"Solicitud rechazada por el guardrail de entrada (patrón detectado: {threat})."
@@ -143,10 +155,13 @@ class AgentOrchestrator:
 
         if proposal.tool_call is not None:
             used_tool = proposal.tool_call.tool
-            analytics_result = self.analytics_agent.execute(proposal.tool_call)
+            with trace_stage("tool_execution", "analytics_agent") as span:
+                analytics_result = self.analytics_agent.execute(proposal.tool_call)
             tool_context = analytics_result.raw_result
 
-            assessment = self.maintenance_advisor.assess(used_tool, tool_context)
+            with trace_stage("maintenance_assessment", "maintenance_advisor") as span:
+                assessment = self.maintenance_advisor.assess(used_tool, tool_context)
+                span.status = "fallback" if assessment.is_urgent else "ok"
             if assessment.is_urgent:
                 maintenance_alert = assessment.reason
 
@@ -157,8 +172,10 @@ class AgentOrchestrator:
             ]
             proposal = self._propose(follow_up, config)
 
-        self.verifier_agent.verify(proposal.raw_text, tool_context=tool_context)
-        self.safety_agent.audit(proposal.raw_text)
+        with trace_stage(STAGE_POST_PROCESSING, "verifier_agent"):
+            self.verifier_agent.verify(proposal.raw_text, tool_context=tool_context)
+        with trace_stage("safety_audit", "safety_agent"):
+            self.safety_agent.audit(proposal.raw_text)
 
         return OrchestratorResult(text=proposal.raw_text, used_tool=used_tool, maintenance_alert=maintenance_alert)
 
