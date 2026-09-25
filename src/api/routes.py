@@ -49,6 +49,7 @@ from pydantic import BaseModel
 from src.agents import AgentMessage, AgentOrchestrator, ConditionSeries, PdMAgent
 from src.engine import GenerationConfig, GenerationError, LLMServer, ModelLoadError
 from src.guardrails import GuardrailError
+from src.telemetry import check_system_health
 from src.tools import ToolExecutionError, ToolNotFoundError, ToolRegistry, build_default_registry
 
 APP_NAME = "slm-openai-gateway"
@@ -318,6 +319,21 @@ def _count_tokens(text: str) -> int:
 @app.get("/health", response_model=HealthResponse)
 def health() -> HealthResponse:
     return HealthResponse()
+
+
+@app.get("/health/detailed")
+def health_detailed() -> dict:
+    """Diagnóstico real (`HEALTHY`/`DEGRADED`/`UNHEALTHY`), a diferencia de
+    `/health` (que solo confirma que el proceso responde -- el liveness
+    probe que usa el healthcheck de Docker Compose, ver `docker-compose.yml`).
+    No fuerza la carga perezosa del modelo: si nadie llamó a `/v1/chat/completions`
+    todavía, reporta el motor como no cargado en vez de cargarlo solo para
+    poder contestar este endpoint.
+    """
+    orchestrator = (
+        AgentOrchestrator(_llm_server, get_tool_registry()) if _llm_server is not None else None
+    )
+    return check_system_health(llm_server=_llm_server, orchestrator=orchestrator)
 
 
 @app.get("/v1/models", response_model=ModelList)

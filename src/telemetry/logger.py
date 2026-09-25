@@ -126,12 +126,13 @@ class _Span:
 
 
 def _emit(span: _Span, latency_ms: float, exc: Optional[BaseException] = None) -> None:
+    latency_ms = round(latency_ms, 3)
     extra = {
         "trace_id": span.trace_id,
         "span_id": span.span_id,
         "agent_name": span.agent_name,
         "stage": span.stage,
-        "latency_ms": round(latency_ms, 3),
+        "latency_ms": latency_ms,
         "token_count": span.token_count,
         "status": span.status,
     }
@@ -142,6 +143,16 @@ def _emit(span: _Span, latency_ms: float, exc: Optional[BaseException] = None) -
         )
     else:
         logger.info(f"stage_completed stage={span.stage} agent={span.agent_name}", extra=extra)
+
+    # Import local (no al tope del módulo) para no crear un ciclo de imports
+    # con metrics.py -- cada span completado, exitoso o no, alimenta el
+    # agregador en memoria que respalda get_performance_summary().
+    from src.telemetry.metrics import default_aggregator
+
+    default_aggregator.record(
+        stage=span.stage, agent_name=span.agent_name, latency_ms=latency_ms,
+        status=span.status, token_count=span.token_count,
+    )
 
 
 @contextmanager

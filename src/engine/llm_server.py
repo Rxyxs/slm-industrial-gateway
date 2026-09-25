@@ -224,6 +224,20 @@ class LLMServer:
         except Exception as exc:  # noqa: BLE001
             raise GenerationError(f"Error durante el streaming: {exc}") from exc
 
+    def dry_run(self) -> int:
+        """Verifica que el motor sigue respondiendo sin gastar cómputo de
+        inferencia real: tokeniza una cadena fija en vez de generar texto.
+
+        Usado por `src.telemetry.health.check_system_health` para distinguir
+        "el objeto Python existe" de "el modelo cargado todavía responde" --
+        si `self._llm` quedó en un estado corrupto (contexto liberado, etc.),
+        esto lanza la misma excepción que lanzaría `generate()`, sin pagar el
+        costo de una generación completa en cada chequeo de salud.
+
+        Devuelve la cantidad de tokens de la cadena fija (>0 si respondió).
+        """
+        return len(self._llm.tokenize(b"health check"))
+
     def close(self) -> None:
         """Libera el contexto de llama.cpp asociado al modelo."""
         llm = getattr(self, "_llm", None)
