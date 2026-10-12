@@ -1,0 +1,14 @@
+# Dependencias mínimas del gateway de planta (src/gateway). No incluye el stack
+# de fine-tuning (torch, unsloth): el gateway no carga modelos, los consume por
+# HTTP, así que su imagen es liviana y corre igual en x86 que en arm64 (Jetson).
+fastapi==0.141.1
+uvicorn[standard]==0.53.0
+pydantic==2.13.5
+httpx==0.28.1
+prometheus-client==0.26.0
+duckdb==1.5.5
+redis==8.1.0
+aiomqtt==2.5.1
+paho-mqtt==2.1.0
+asyncua==2.1.0
+pymodbus==3.16.1

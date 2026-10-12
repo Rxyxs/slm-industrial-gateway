@@ -1,0 +1,306 @@
+{
+  "source": "Kaggle: Quality Prediction in a Mining Process",
+  "seed": 42,
+  "results": [
+    {
+      "model": "qwen2.5:0.5b-instruct",
+      "n": 60,
+      "deadline_s": 3.0,
+      "valid_pct": 100.0,
+      "physics_rejected_pct": 0.0,
+      "contract_failure_pct": 0.0,
+      "premise_contradicted_pct": 50.0,
+      "outcomes": {
+        "valid": 60
+      },
+      "rejection_breakdown_no_deadline": {
+        "valid, premise contradicted": 30,
+        "valid": 30
+      },
+      "actions": {
+        "RAISE_ALARM": 60
+      },
+      "tiers": {
+        "edge": 60
+      },
+      "latency_ms": {
+        "p50": 931.9,
+        "p95": 1733.0,
+        "max": 1789.9
+      },
+      "audit_chain_ok": true,
+      "set": "random",
+      "wall_s": 121.0
+    },
+    {
+      "model": "qwen2.5:1.5b-instruct",
+      "n": 60,
+      "deadline_s": 3.0,
+      "valid_pct": 100.0,
+      "physics_rejected_pct": 0.0,
+      "contract_failure_pct": 0.0,
+      "premise_contradicted_pct": 100.0,
+      "outcomes": {
+        "valid": 60
+      },
+      "rejection_breakdown_no_deadline": {
+        "valid, premise contradicted": 60
+      },
+      "actions": {
+        "HOLD": 60
+      },
+      "tiers": {
+        "edge": 60
+      },
+      "latency_ms": {
+        "p50": 1907.7,
+        "p95": 2048.3,
+        "max": 2243.3
+      },
+      "audit_chain_ok": true,
+      "set": "random",
+      "wall_s": 206.4
+    },
+    {
+      "model": "qwen2.5:3b-instruct",
+      "n": 60,
+      "deadline_s": 3.0,
+      "valid_pct": 100.0,
+      "physics_rejected_pct": 0.0,
+      "contract_failure_pct": 0.0,
+      "premise_contradicted_pct": 0.0,
+      "outcomes": {
+        "valid": 60
+      },
+      "rejection_breakdown_no_deadline": {
+        "valid": 60
+      },
+      "actions": {
+        "HOLD": 60
+      },
+      "tiers": {
+        "edge": 60
+      },
+      "latency_ms": {
+        "p50": 1829.1,
+        "p95": 2084.0,
+        "max": 2283.9
+      },
+      "audit_chain_ok": true,
+      "set": "random",
+      "wall_s": 196.3
+    },
+    {
+      "model": "llama3.2:3b",
+      "n": 60,
+      "deadline_s": 3.0,
+      "valid_pct": 96.7,
+      "physics_rejected_pct": 0.0,
+      "contract_failure_pct": 3.3,
+      "premise_contradicted_pct": 0.0,
+      "outcomes": {
+        "valid": 58,
+        "3b": 2
+      },
+      "rejection_breakdown_no_deadline": {
+        "valid": 59,
+        "shape: not valid JSON": 1
+      },
+      "actions": {
+        "HOLD": 60
+      },
+      "tiers": {
+        "edge": 58,
+        "failsafe": 2
+      },
+      "latency_ms": {
+        "p50": 1673.3,
+        "p95": 1938.3,
+        "max": 3015.4
+      },
+      "audit_chain_ok": true,
+      "set": "random",
+      "wall_s": 187.0
+    },
+    {
+      "model": "phi3.5:3.8b",
+      "n": 60,
+      "deadline_s": 3.0,
+      "valid_pct": 0.0,
+      "physics_rejected_pct": 0.0,
+      "contract_failure_pct": 100.0,
+      "premise_contradicted_pct": 0.0,
+      "outcomes": {
+        "3.8b": 60
+      },
+      "rejection_breakdown_no_deadline": {
+        "valid": 31,
+        "engine: timeout >30s": 29
+      },
+      "actions": {
+        "HOLD": 60
+      },
+      "tiers": {
+        "failsafe": 60
+      },
+      "latency_ms": {
+        "p50": 3010.2,
+        "p95": 3019.2,
+        "max": 3024.8
+      },
+      "audit_chain_ok": true,
+      "set": "random",
+      "wall_s": 1314.0
+    },
+    {
+      "model": "qwen2.5:0.5b-instruct",
+      "n": 60,
+      "deadline_s": 3.0,
+      "valid_pct": 100.0,
+      "physics_rejected_pct": 0.0,
+      "contract_failure_pct": 0.0,
+      "premise_contradicted_pct": 40.0,
+      "outcomes": {
+        "valid": 60
+      },
+      "rejection_breakdown_no_deadline": {
+        "valid": 34,
+        "valid, premise contradicted": 26
+      },
+      "actions": {
+        "RAISE_ALARM": 60
+      },
+      "tiers": {
+        "edge": 60
+      },
+      "latency_ms": {
+        "p50": 897.3,
+        "p95": 1662.9,
+        "max": 1741.5
+      },
+      "audit_chain_ok": true,
+      "set": "high_silica",
+      "wall_s": 122.1
+    },
+    {
+      "model": "qwen2.5:1.5b-instruct",
+      "n": 60,
+      "deadline_s": 3.0,
+      "valid_pct": 100.0,
+      "physics_rejected_pct": 0.0,
+      "contract_failure_pct": 0.0,
+      "premise_contradicted_pct": 100.0,
+      "outcomes": {
+        "valid": 60
+      },
+      "rejection_breakdown_no_deadline": {
+        "valid, premise contradicted": 60
+      },
+      "actions": {
+        "HOLD": 60
+      },
+      "tiers": {
+        "edge": 60
+      },
+      "latency_ms": {
+        "p50": 1759.5,
+        "p95": 2001.8,
+        "max": 2044.5
+      },
+      "audit_chain_ok": true,
+      "set": "high_silica",
+      "wall_s": 205.9
+    },
+    {
+      "model": "qwen2.5:3b-instruct",
+      "n": 60,
+      "deadline_s": 3.0,
+      "valid_pct": 100.0,
+      "physics_rejected_pct": 0.0,
+      "contract_failure_pct": 0.0,
+      "premise_contradicted_pct": 0.0,
+      "outcomes": {
+        "valid": 60
+      },
+      "rejection_breakdown_no_deadline": {
+        "valid": 60
+      },
+      "actions": {
+        "HOLD": 60
+      },
+      "tiers": {
+        "edge": 60
+      },
+      "latency_ms": {
+        "p50": 1617.4,
+        "p95": 2076.0,
+        "max": 2568.7
+      },
+      "audit_chain_ok": true,
+      "set": "high_silica",
+      "wall_s": 202.0
+    },
+    {
+      "model": "llama3.2:3b",
+      "n": 60,
+      "deadline_s": 3.0,
+      "valid_pct": 98.3,
+      "physics_rejected_pct": 0.0,
+      "contract_failure_pct": 1.7,
+      "premise_contradicted_pct": 0.0,
+      "outcomes": {
+        "valid": 59,
+        "3b": 1
+      },
+      "rejection_breakdown_no_deadline": {
+        "valid": 59,
+        "shape: not valid JSON": 1
+      },
+      "actions": {
+        "HOLD": 60
+      },
+      "tiers": {
+        "edge": 59,
+        "failsafe": 1
+      },
+      "latency_ms": {
+        "p50": 1420.4,
+        "p95": 1898.0,
+        "max": 3018.0
+      },
+      "audit_chain_ok": true,
+      "set": "high_silica",
+      "wall_s": 186.6
+    },
+    {
+      "model": "phi3.5:3.8b",
+      "n": 60,
+      "deadline_s": 3.0,
+      "valid_pct": 0.0,
+      "physics_rejected_pct": 0.0,
+      "contract_failure_pct": 100.0,
+      "premise_contradicted_pct": 0.0,
+      "outcomes": {
+        "3.8b": 60
+      },
+      "rejection_breakdown_no_deadline": {
+        "valid": 32,
+        "engine: timeout >30s": 28
+      },
+      "actions": {
+        "HOLD": 60
+      },
+      "tiers": {
+        "failsafe": 60
+      },
+      "latency_ms": {
+        "p50": 3013.4,
+        "p95": 3019.5,
+        "max": 3020.8
+      },
+      "audit_chain_ok": true,
+      "set": "high_silica",
+      "wall_s": 1316.1
+    }
+  ]
+}

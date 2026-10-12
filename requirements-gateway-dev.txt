@@ -1,0 +1,8 @@
+-r requirements-gateway.txt
+pytest==9.1.1
+pytest-asyncio==1.4.0
+fakeredis==2.39.0
+# scripts/replay_flotation.py y scripts/bench_gateway.py
+pandas==2.3.3
+pyarrow==25.0.1
+matplotlib==3.10.9

@@ -9,6 +9,15 @@ to industrial and mining jargon, with analytical tool execution (DuckDB, anomaly
 detection, RUL computation) and safety guardrails. Designed to be deployed
 on-prem, with no network dependency on the inference path.
 
+The repo holds two services that share the domain but not the code path:
+
+- **Chat gateway** (`src/api`, `src/agents`, …): OpenAI-compatible chat with tools,
+  described in [Architecture](#architecture).
+- **Plant gateway** (`src/gateway`): telemetry from MQTT / OPC UA / Modbus / REST in, one
+  validated action out (`HOLD`, `ADJUST_SETPOINT`, `RAISE_ALARM`) within a 3 s deadline,
+  with edge→cloud routing, circuit breakers, prompt-injection screening and a
+  tamper-evident audit log. See [Plant gateway](#plant-gateway-srcgateway).
+
 ## Architecture
 
 The system is made of six independent modules under `src/`, wired together by the
@@ -309,6 +318,272 @@ The full JSON (all 100 individual results, with the exact detail of each block) 
 version-controlled at
 [`outputs/reports/eval_metrics.json`](outputs/reports/eval_metrics.json).
 
+## Plant gateway (`src/gateway`)
+
+A second service in this repo, separate from the chat gateway above: it sits between
+the plant floor (PLCs, SCADA, MQTT telemetry) and one or more SLM engines, and turns a
+telemetry snapshot into **one action a PLC can execute** — `HOLD`, `ADJUST_SETPOINT`
+or `RAISE_ALARM` — inside a bounded deadline. It never loads a model itself; it consumes
+Ollama, vLLM or any OpenAI-compatible engine over HTTP, so its image has no CUDA and runs
+the same on an x86 IPC and on a Jetson.
+
+### Why the output contract is the whole design
+
+An SLM that writes prose is useless to a PLC, and an SLM that writes a plausible
+setpoint is dangerous. Running real models against real plant data showed three ways a
+constrained model still fails, and each one shaped a layer of the gateway:
+
+1. **Grammar-constrained decoding does not enforce everything in the schema.** With a
+   flat schema (`confidence: float` in [0, 1], optional `target_tag`), qwen2.5:1.5b
+   returned `confidence: 3` and `HOLD` *with* a setpoint attached — the grammar Ollama
+   builds from the JSON Schema honours types and enums but ignores `minimum`, `maximum`,
+   `maxLength` and cross-field rules. That was a contract failure on **10% of
+   random hours and 16.7% of high-silica hours**.
+   The fix was to express the rules in what the grammar *does* enforce: the model output
+   is a discriminated union (`HoldOutput | AdjustOutput | AlarmOutput`, keyed on
+   `action`) where the HOLD variant has no setpoint fields at all, and confidence is
+   `LOW | MEDIUM | HIGH`. Same model, same hours: 0% / 0%.
+2. **A shape-valid answer can still be physically unsafe.** Every `ADJUST_SETPOINT` is
+   checked in code against the tag's range and against `max_step` from the *current*
+   reading. Both come from the data, not a manual: p1/p99 of each variable and p99 of
+   the change between consecutive readings in the plant dataset (`src/gateway/tags.py`).
+   A failed check becomes `HOLD` and the router does **not** try another engine —
+   shopping for a backend that approves an unsafe move is exactly what it must not do.
+3. **A valid, safe answer can be justified by something false.** The models' free-text
+   rationale contradicted the telemetry ("pH out of range" with pH 10.13 inside
+   [8.75, 10.6]). The structured `reason_code` is therefore verified in code: a setpoint
+   change whose stated premise the data contradicts is not executed, and a HOLD or alarm
+   with a false premise is passed through with a warning in the response and the audit log.
+
+### Architecture
+
+```
+ Sensors / PLCs                     Plant gateway (src/gateway)                       SLM engines
+ ─────────────                      ───────────────────────────                       ───────────
+ OPC UA server ──┐                                                                   ┌─ Ollama (GPU)  edge
+ Modbus TCP   ───┼─ field.py ──┐   ┌──────────────────────────────────────────┐     ├─ vLLM          edge
+                 │  (read)     │   │ security.py   API key · mTLS (uvicorn)   │     └─ OpenAI-compat cloud
+ MQTT broker ────┼─ mqtt_      ├──▶│               prompt-injection rules      │          (off by default)
+  plant/+/       │  bridge.py  │   │ resilience.py token bucket · cache (Redis)│
+  telemetry      │             │   │ router.py     complexity score → plan     │     per engine:
+ REST/SCADA ─────┴─ app.py ────┘   │               single-flight per key       │──▶  CircuitBreaker
+  POST /v1/infer                   │               deadline budget (3 s)       │     (closed/open/half-open)
+  POST /v1/jobs ── jobs.py ───────▶│               re-warm on open breaker     │◀──  ModelOutput JSON
+  (Redis queue, N workers)         │ validation.py schema · physics · premise  │     (guided decoding)
+                                   │ audit.py      DuckDB, SHA-256 hash chain  │
+                                   └───────────────┬──────────────────────────┘
+                                                   │ validated ControlAction
+             Actuators / SCADA                     ▼
+             ─────────────────     plant/<asset>/recommendation (MQTT, QoS 1)
+             PLC setpoint      ◀── field.py write — only if mode=closed_loop
+                                   AND ALLOW_PLC_WRITEBACK=true AND action validated
+                                   AND not from cache/failsafe
+```
+
+Request path for `POST /v1/infer` (the MQTT bridge calls the same router):
+
+1. Pydantic validates the request: known tags only, finite values, ≤ 64 readings.
+2. The operator note (the only free text) is normalized (NFKC, control/zero-width
+   characters stripped) and checked against injection rules. A flagged note is dropped,
+   the telemetry is still evaluated, and the event is audited.
+3. Cache lookup on a key that buckets every reading at 1% of the tag's range. A hit is
+   re-checked against physics with the *current* readings. Identical requests already in
+   flight wait for that result instead of hitting the GPU again.
+4. A complexity score (readings out of range, bad quality, note length) picks the plan:
+   edge first; cloud first only above the threshold and only if `ALLOW_CLOUD=true`.
+5. Each engine is called through its circuit breaker with whatever is left of the
+   deadline. Timeout, connection error, open breaker or non-conforming output → next
+   engine. Nothing left → `HOLD` with `tier=failsafe`. The SCADA always gets a 200 and an
+   action inside the deadline, never a 5xx because a model is down.
+6. The action is validated (schema → physics → premise), audited, and only then
+   optionally written to the PLC.
+
+### Results (real models, real plant data)
+
+Measured on an RTX 4060 Ti 8 GB with Ollama 0.12.6, through the same `InferenceRouter`
+the service uses (3 s deadline). Telemetry: hourly means of the public
+[flotation plant dataset](https://www.kaggle.com/datasets/edumagalhaes/quality-prediction-in-a-mining-process)
+(737,453 rows, March–September 2017), 60 random hours and 60 hours from the top decile
+of silica in concentrate (≥ 4.14%), seed 42. Reproduce with
+`python scripts/bench_gateway.py`; raw numbers in `outputs/reports/gateway_bench.json`.
+
+![Gateway benchmark](docs/figures/gateway_bench.png)
+
+| Model | Set | Valid contract | Premise contradicted | Failsafe | Actions | p50 / p95 (ms) |
+|---|---|---|---|---|---|---|
+| `qwen2.5:0.5b-instruct` | random | 100% | 50% | 0% | RAISE_ALARM 60 | 932 / 1733 |
+| `qwen2.5:1.5b-instruct` | random | 100% | 100% | 0% | HOLD 60 | 1908 / 2048 |
+| `qwen2.5:3b-instruct` | random | 100% | 0% | 0% | HOLD 60 | 1829 / 2084 |
+| `llama3.2:3b` | random | 96.7% | 0% | 3.3% | HOLD 60 | 1673 / 1938 |
+| `phi3.5:3.8b` | random | 0% | 0% | 100% | HOLD 60 | 3010 / 3019 |
+| `qwen2.5:0.5b-instruct` | high silica | 100% | 40% | 0% | RAISE_ALARM 60 | 897 / 1663 |
+| `qwen2.5:1.5b-instruct` | high silica | 100% | 100% | 0% | HOLD 60 | 1760 / 2002 |
+| `qwen2.5:3b-instruct` | high silica | 100% | 0% | 0% | HOLD 60 | 1617 / 2076 |
+| `llama3.2:3b` | high silica | 98.3% | 0% | 1.7% | HOLD 60 | 1420 / 1898 |
+| `phi3.5:3.8b` | high silica | 0% | 0% | 100% | HOLD 60 | 3013 / 3020 |
+
+
+The dataset has no "correct action" label, so this measures what the gateway can
+guarantee — contract compliance, physical safety, latency — not decision quality.
+
+What the numbers say:
+
+- **Contract**: with the union schema, qwen2.5 0.5b/1.5b/3b produced a valid action every
+  time; llama3.2:3b failed once per set with JSON cut off at the deadline. phi3.5:3.8b did
+  not fit: it hit the 3 s deadline on 60/60 hours, and even with a 30 s budget it timed
+  out on 29/60 (random) and 28/60 (high silica), so it is not a control-loop model on this GPU.
+- **Physics**: no response proposed `ADJUST_SETPOINT`, so the physical checks rejected
+  nothing (0% in every row). **Not one model, on any hour — including the 60 hours with
+  silica at 4.77% on average — proposed moving a reagent setpoint.** Behind that sit three
+  different behaviours: qwen2.5:0.5b raised an alarm on every single hour, qwen2.5:1.5b
+  always held but cited a reason the data contradicted (100% of hours), and the 3B models
+  held with a consistent reason. An SLM given only a snapshot and generic rules is
+  conservative to the point of being uninformative: the gateway makes it safe, not useful.
+  Making it useful needs plant-specific context (the soft sensor, recent trends, operator
+  history) or fine-tuning, not a bigger guardrail.
+- **Premise checks earn their place**: without them, qwen2.5:1.5b would look like a
+  perfect model here (100% valid, sensible-looking HOLDs) while being wrong about *why*
+  on every hour. Latency varied between runs on the same hardware (qwen2.5:0.5b p50 was
+  567 ms in an earlier run and 932 ms in this one); the table is the run in the JSON.
+
+
+#### Engine outage
+
+`scripts/failover_demo.py` sends one real plant hour per second to the deployed stack,
+stops the Ollama container, and starts it again:
+
+![Failover timeline](docs/figures/gateway_failover.png)
+
+81 requests, **81 HTTP 200, none above 2.52 s** (deadline 3 s). The first failures after
+the stop cost up to a full engine timeout (2.5 s); after the third the breaker opened and the
+failsafe HOLD came back in a median of **10.7 ms** without waiting on the dead engine. The
+half-open probe 15 s later failed once more (the engine was still down) and re-opened the
+breaker. The engine came back at t = 36 s with the model unloaded; the background re-warm
+reloaded it while the breaker was still open, so the next probe (t = 48.7 s) succeeded and
+the edge path resumed at ~950 ms median, with no manual action. During those 34 failsafe
+answers the PLC received a valid `HOLD` every second — never an error, never a timeout.
+
+### Endpoints
+
+| Method | Path | Purpose |
+|---|---|---|
+| `POST` | `/v1/infer` | Synchronous inference, bounded by `GATEWAY_DEADLINE_S`. Body: `InferenceRequest`. Returns `InferenceResponse`; headers `X-Request-ID`, `X-PLC-Written`, `X-PLC-Write-Note`. |
+| `POST` | `/v1/jobs` | Deferred inference (shift reports, batch diagnosis) → `202 {"job_id"}`. Runs on a fixed worker pool so it never competes with the control loop for the GPU. |
+| `GET` | `/v1/jobs/{job_id}` | `queued` / `running` / `done` (with result) / `failed`. |
+| `GET` | `/v1/backends` | Circuit-breaker state per engine and warm-up status. |
+| `GET` | `/v1/audit?limit=50` | Latest decisions plus `chain_ok` (hash-chain verification). |
+| `GET` | `/v1/schema` | JSON Schemas: `scada_action` (what the PLC parses) and `model_output` (what the engine is constrained to). |
+| `GET` | `/health` | Liveness; does not touch the engines. |
+| `GET` | `/metrics` | Prometheus: `slmgw_inference_total{tier,action,degraded}`, `slmgw_inference_latency_seconds`, `slmgw_rate_limited_total`. |
+
+Every endpoint except `/health`, `/metrics` and `/v1/schema` requires `X-API-Key`
+when `GATEWAY_API_KEYS` is set. Errors are `{"error": ..., "type": ...}`; `429`
+carries `Retry-After`.
+
+```bash
+curl -s -H "X-API-Key: $KEY" -H "Content-Type: application/json" localhost:8080/v1/infer -d '{
+  "asset_id": "flot-col-01", "mode": "advisory",
+  "telemetry": [{"tag": "amina_flow", "value": 557.4}, {"tag": "ore_pulp_ph", "value": 10.07},
+                {"tag": "silica_concentrate_pct", "value": 4.9}]}'
+```
+
+```json
+{"request_id": "…", "asset_id": "flot-col-01",
+ "action": {"action": "HOLD", "target_tag": null, "new_value": null,
+            "reason_code": "WITHIN_NORMAL", "confidence": "HIGH", "rationale": "…"},
+ "backend": "edge-ollama", "tier": "edge", "latency_ms": 912.4, "cached": false,
+ "degraded": false, "rejected_reason": null, "warnings": [], "attempts": ["edge-ollama:ok"]}
+```
+
+MQTT: publish an `InferenceRequest` to `plant/<asset_id>/telemetry`; the answer arrives
+on `plant/<asset_id>/recommendation` (QoS 1) with `plc_written` and `plc_write_note`
+added. A malformed payload, or an `asset_id` that does not match the topic, is answered
+on `plant/<asset_id>/rejected`.
+
+### Plant deployment guide
+
+```bash
+cp deploy/edge/.env.example deploy/edge/.env     # set GATEWAY_API_KEYS at least
+docker compose -f deploy/edge/docker-compose.yml up -d --build
+curl -s -H "X-API-Key: <key>" localhost:8080/v1/backends   # warmup: {"edge-ollama": "ready"}
+python scripts/replay_flotation.py --csv data/flotation/MiningProcess_Flotation_Plant_Database.csv --n 20
+```
+
+The stack is the gateway, Mosquitto, Redis (AOF on, LRU cap) and Ollama with a GPU
+reservation; `ollama-pull` downloads the model once into a volume. `--profile vllm`
+adds a vLLM server with xgrammar guided decoding (point `EDGE_VLLM_URL` at it); that
+profile is declared but was not run for the results above. On a Jetson, build the gateway
+image for `linux/arm64` (`docker buildx build --platform linux/arm64 -f deploy/edge/Dockerfile .`)
+and replace the `ollama` service with a JetPack-compatible build.
+
+Checklist before connecting to a real plant:
+
+- **Writeback stays off** (`ALLOW_PLC_WRITEBACK=false`) until the advisory mode has run
+  long enough for operations to trust it. Writes additionally require
+  `mode=closed_loop` per request, a validated `ADJUST_SETPOINT`, and an answer that did
+  not come from cache or failsafe; `FieldWriter.apply()` re-checks all four.
+- **Tag registry**: replace the limits in `src/gateway/tags.py` with your plant's
+  operating envelope and your PLC's OPC UA node ids / Modbus registers and scaling.
+- **mTLS**: put `server.crt`, `server.key` and the plant CA in `deploy/edge/tls/` and set
+  `TLS_CERT_FILE`, `TLS_KEY_FILE`, `TLS_CA_FILE`; uvicorn then requires a client
+  certificate signed by that CA before any request reaches the API.
+- **MQTT**: the bundled `mosquitto.conf` is a demo (anonymous on the internal network).
+  Enable `password_file` and the TLS listener on 8883.
+- **OPC UA security**: set `OPCUA_SECURITY`, e.g. `Basic256Sha256,SignAndEncrypt,cert.der,key.pem`.
+- **Air gap**: leave `ALLOW_CLOUD=false` (the default). The router then never plans a
+  cloud call, whatever the complexity score.
+- **Audit**: the DuckDB file lives in the `audit-data` volume. Back it up; `GET /v1/audit`
+  reports `chain_ok=false` and the first broken `seq` if any row was edited or deleted.
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `EDGE_OLLAMA_URL` / `EDGE_OLLAMA_MODEL` | `http://localhost:11434` / `qwen2.5:1.5b-instruct` | Edge engine (Ollama). |
+| `EDGE_VLLM_URL` / `EDGE_VLLM_MODEL` | unset | Optional second edge engine (OpenAI-compatible). |
+| `CLOUD_LLM_URL` / `CLOUD_LLM_MODEL` / `CLOUD_LLM_API_KEY` | unset | Cloud fallback, used only with `ALLOW_CLOUD=true`. |
+| `GATEWAY_DEADLINE_S` | `3.0` | Total budget per synchronous inference, fallbacks included. |
+| `EDGE_TIMEOUT_S` / `CLOUD_TIMEOUT_S` | `2.5` / `8` | Per-call cap (always clipped to what is left of the deadline). |
+| `CLOUD_COMPLEXITY_THRESHOLD` / `EDGE_MAX_COMPLEXITY` | `0.7` / `0.7` | Routing thresholds on the complexity score. |
+| `BREAKER_FAILURES` / `BREAKER_RESET_S` | `3` / `15` | Circuit breaker. |
+| `RATE_LIMIT_PER_MIN` / `RATE_LIMIT_BURST` | `120` / `20` | Token bucket per API client. |
+| `CACHE_TTL_S` | `30` | Response cache TTL. |
+| `REDIS_URL` | unset | Shared cache and persistent job queue; in-memory without it. |
+| `GATEWAY_API_KEYS` | unset (auth off) | Comma-separated keys; stored as SHA-256. |
+| `ALLOW_PLC_WRITEBACK` | `false` | Master switch for writes to the PLC. |
+| `OPCUA_URL` / `OPCUA_SECURITY` / `MODBUS_HOST` / `MODBUS_PORT` | unset | Field connector used for writeback. |
+| `MQTT_HOST` / `MQTT_PORT` / `MQTT_USERNAME` / `MQTT_PASSWORD` | unset / `1883` | Enables the MQTT bridge. |
+| `TLS_CERT_FILE` / `TLS_KEY_FILE` / `TLS_CA_FILE` | unset | Enables mTLS when all three are set. |
+| `AUDIT_DB_PATH` | `data/audit/gateway_audit.duckdb` | DuckDB audit file. |
+
+### Integration tests
+
+```bash
+python -m venv venv && venv/Scripts/pip install -r requirements-gateway-dev.txt   # Linux: venv/bin/pip
+pytest tests/gateway -v
+```
+
+81 tests, no GPU or network required:
+
+| File | What it exercises |
+|---|---|
+| `test_validation.py` | Model-output contract, physics bounds and steps, premise checks, guided-schema shape. |
+| `test_breaker.py` | Closed → open → half-open → closed/open transitions on an injected clock. |
+| `test_router.py` | Edge→cloud fallback, breaker skipping a dead engine, deadline cut, failsafe, no backend-shopping after a physics rejection, injection handling, cache, single-flight, re-warm, concurrency + intact audit chain. |
+| `test_security_audit.py` | Injection rules (English/Spanish, hidden zero-width), benign operator notes, API keys, token bucket, audit hash chain across restarts and tamper detection. |
+| `test_api.py` | REST contract: 401/422/429, writeback gating, unsafe setpoint never written, jobs, audit, metrics. |
+| `test_protocols.py` | Real OPC UA server (asyncua) and Modbus TCP slave (pymodbus) on local sockets: read, write, register scaling, closed loop Modbus → router → Modbus; MQTT bridge routing; Redis cache and job queue (fakeredis). |
+
+The CI job `plant-gateway` runs this suite and builds the edge image.
+
+### Data
+
+The benchmark and replay scripts read the Kaggle dataset
+[Quality Prediction in a Mining Process](https://www.kaggle.com/datasets/edumagalhaes/quality-prediction-in-a-mining-process)
+(`edumagalhaes`, CC0-1.0). It is not stored in the repository:
+
+```bash
+kaggle datasets download -d edumagalhaes/quality-prediction-in-a-mining-process -p data/flotation --unzip
+```
+
 ## Repository structure
 
 ```
@@ -347,6 +622,11 @@ outputs/
                    gguf_benchmark.json (latest real CPU run),
                    eval_metrics.json (real offline evaluation, 100 prompts) and
                    finetuning_metrics.json (verified state of the QLoRA pipeline)
+  gateway/      Plant gateway: router, breaker, backends (Ollama/OpenAI-compatible),
+                schemas + validation, security, cache/rate limit, jobs, DuckDB
+                audit, protocols/ (MQTT bridge, OPC UA, Modbus TCP), serve.py
+deploy/edge/    Dockerfile (CPU, amd64/arm64) and docker-compose.yml (gateway +
+                Mosquitto + Redis + Ollama GPU, optional vLLM profile)
 monitoring/
   prometheus.yml  Scrape configuration for the Prometheus container
 tests/
@@ -486,7 +766,8 @@ public network by default.
 ## Tests
 
 ```bash
-pytest -v
+pytest -v --ignore=tests/gateway   # chat gateway (requirements.txt)
+pytest -v tests/gateway            # plant gateway (requirements-gateway-dev.txt)
 ```
 
 Per module:

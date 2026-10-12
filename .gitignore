@@ -37,3 +37,7 @@ data/models/
 .idea/
 Thumbs.db
 .DS_Store
+
+# Dataset de Kaggle (se descarga con la CLI de Kaggle, ver README)
+data/flotation/
+data/audit/

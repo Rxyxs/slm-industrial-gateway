@@ -1,0 +1,136 @@
+# Stack de borde: gateway + broker MQTT + Redis + servidor SLM local.
+#
+#   docker compose -f deploy/edge/docker-compose.yml up -d
+#   docker compose -f deploy/edge/docker-compose.yml --profile vllm up -d   # vLLM en vez de Ollama
+#
+# Todos los puertos se publican solo en 127.0.0.1. En planta, la exposición a la
+# red OT se hace por el firewall/DMZ, no abriendo puertos del contenedor.
+
+name: slm-edge
+
+services:
+  gateway:
+    build:
+      context: ../..
+      dockerfile: deploy/edge/Dockerfile
+    image: slm-industrial-gateway:0.2.0
+    restart: unless-stopped
+    environment:
+      EDGE_OLLAMA_URL: http://ollama:11434
+      EDGE_OLLAMA_MODEL: ${EDGE_OLLAMA_MODEL:-qwen2.5:1.5b-instruct}
+      EDGE_TIMEOUT_S: ${EDGE_TIMEOUT_S:-2.5}
+      # Con el perfil vllm: EDGE_VLLM_URL=http://vllm:8000
+      EDGE_VLLM_URL: ${EDGE_VLLM_URL:-}
+      CLOUD_LLM_URL: ${CLOUD_LLM_URL:-}
+      CLOUD_LLM_API_KEY: ${CLOUD_LLM_API_KEY:-}
+      ALLOW_CLOUD: ${ALLOW_CLOUD:-false}
+      GATEWAY_DEADLINE_S: ${GATEWAY_DEADLINE_S:-3.0}
+      GATEWAY_API_KEYS: ${GATEWAY_API_KEYS:?set GATEWAY_API_KEYS in deploy/edge/.env}
+      ALLOW_PLC_WRITEBACK: ${ALLOW_PLC_WRITEBACK:-false}
+      REDIS_URL: redis://redis:6379/0
+      MQTT_HOST: mosquitto
+      OPCUA_URL: ${OPCUA_URL:-}
+      MODBUS_HOST: ${MODBUS_HOST:-}
+      TLS_CERT_FILE: ${TLS_CERT_FILE:-}
+      TLS_KEY_FILE: ${TLS_KEY_FILE:-}
+      TLS_CA_FILE: ${TLS_CA_FILE:-}
+    ports:
+      - "127.0.0.1:8080:8080"
+    volumes:
+      - audit-data:/var/lib/slmgw/audit
+      - ./tls:/etc/slmgw/tls:ro
+    depends_on:
+      redis:
+        condition: service_healthy
+      mosquitto:
+        condition: service_started
+      ollama:
+        condition: service_healthy
+    networks: [ot]
+
+  mosquitto:
+    image: eclipse-mosquitto:2.0.22
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:1883:1883"
+    volumes:
+      - ./mosquitto/mosquitto.conf:/mosquitto/config/mosquitto.conf:ro
+      - mosquitto-data:/mosquitto/data
+    networks: [ot]
+
+  redis:
+    image: redis:7.4.6-alpine
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes", "--maxmemory", "256mb",
+              "--maxmemory-policy", "allkeys-lru"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 2s
+      retries: 10
+    volumes:
+      - redis-data:/data
+    networks: [ot]
+
+  ollama:
+    image: ollama/ollama:0.12.6
+    restart: unless-stopped
+    environment:
+      OLLAMA_KEEP_ALIVE: 30m
+      OLLAMA_NUM_PARALLEL: "2"
+    ports:
+      - "127.0.0.1:11434:11434"
+    volumes:
+      - ollama-models:/root/.ollama
+    healthcheck:
+      test: ["CMD", "ollama", "list"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    networks: [ot]
+
+  # Descarga el modelo una sola vez al volumen y termina.
+  ollama-pull:
+    image: ollama/ollama:0.12.6
+    entrypoint: ["sh", "-c", "OLLAMA_HOST=ollama:11434 ollama pull ${EDGE_OLLAMA_MODEL:-qwen2.5:1.5b-instruct}"]
+    depends_on:
+      ollama:
+        condition: service_healthy
+    restart: "no"
+    networks: [ot]
+
+  # Alternativa a Ollama: vLLM con guided decoding (xgrammar) y API OpenAI.
+  vllm:
+    profiles: ["vllm"]
+    image: vllm/vllm-openai:v0.11.0
+    command: ["--model", "Qwen/Qwen2.5-1.5B-Instruct", "--max-model-len", "4096",
+              "--gpu-memory-utilization", "0.80", "--guided-decoding-backend", "xgrammar"]
+    ipc: host
+    volumes:
+      - hf-cache:/root/.cache/huggingface
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    networks: [ot]
+
+networks:
+  ot:
+    driver: bridge
+
+volumes:
+  audit-data:
+  mosquitto-data:
+  redis-data:
+  ollama-models:
+  hf-cache:

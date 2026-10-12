@@ -1,0 +1,914 @@
+{
+ "summary": {
+  "requests": 81,
+  "non_200": 0,
+  "max_wall_ms": 2513.8,
+  "tiers": {
+   "edge": 47,
+   "failsafe": 34
+  },
+  "events": [
+   {
+    "t": 10.61,
+    "event": "engine stopped"
+   },
+   {
+    "t": 36.2,
+    "event": "engine started"
+   }
+  ]
+ },
+ "timeline": [
+  {
+   "t": 0.05,
+   "http": 200,
+   "tier": "edge",
+   "action": "HOLD",
+   "wall_ms": 1940.0,
+   "breaker": "closed",
+   "attempts": [
+    "edge-ollama:ok"
+   ]
+  },
+  {
+   "t": 1.99,
+   "http": 200,
+   "tier": "edge",
+   "action": "HOLD",
+   "wall_ms": 2019.9,
+   "breaker": "closed",
+   "attempts": [
+    "edge-ollama:ok"
+   ]
+  },
+  {
+   "t": 4.02,
+   "http": 200,
+   "tier": "edge",
+   "action": "HOLD",
+   "wall_ms": 1873.9,
+   "breaker": "closed",
+   "attempts": [
+    "edge-ollama:ok"
+   ]
+  },
+  {
+   "t": 5.89,
+   "http": 200,
+   "tier": "edge",
+   "action": "HOLD",
+   "wall_ms": 1408.0,
+   "breaker": "closed",
+   "attempts": [
+    "edge-ollama:ok"
+   ]
+  },
+  {
+   "t": 7.3,
+   "http": 200,
+   "tier": "edge",
+   "action": "HOLD",
+   "wall_ms": 1311.3,
+   "breaker": "closed",
+   "attempts": [
+    "edge-ollama:ok"
+   ]
+  },
+  {
+   "t": 8.62,
+   "http": 200,
+   "tier": "edge",
+   "action": "HOLD",
+   "wall_ms": 1343.5,
+   "breaker": "closed",
+   "attempts": [
+    "edge-ollama:ok"
+   ]
+  },
+  {
+   "t": 9.96,
+   "http": 200,
+   "tier": "failsafe",
+   "action": "HOLD",
+   "wall_ms": 125.2,
+   "breaker": "closed",
+   "attempts": [
+    "edge-ollama:BackendError"
+   ]
+  },
+  {
+   "t": 10.97,
+   "http": 200,
+   "tier": "failsafe",
+   "action": "HOLD",
+   "wall_ms": 2512.8,
+   "breaker": "closed",
+   "attempts": [
+    "edge-ollama:TimeoutError"
+   ]
+  },
+  {
+   "t": 13.49,
+   "http": 200,
+   "tier": "failsafe",
+   "action": "HOLD",
+   "wall_ms": 2513.8,
+   "breaker": "open",
+   "attempts": [
+    "edge-ollama:TimeoutError"
+   ]
+  },
+  {
+   "t": 16.0,
+   "http": 200,
+   "tier": "failsafe",
+   "action": "HOLD",
+   "wall_ms": 9.2,
+   "breaker": "open",
+   "attempts": [
+    "edge-ollama:circuit_open"
+   ]
+  },
+  {
+   "t": 17.02,
+   "http": 200,
+   "tier": "failsafe",
+   "action": "HOLD",
+   "wall_ms": 9.8,
+   "breaker": "open",
+   "attempts": [
+    "edge-ollama:circuit_open"
+   ]
+  },
+  {
+   "t": 18.03,
+   "http": 200,
+   "tier": "failsafe",
+   "action": "HOLD",
+   "wall_ms": 10.4,
+   "breaker": "open",
+   "attempts": [
+    "edge-ollama:circuit_open"
+   ]
+  },
+  {
+   "t": 19.03,
+   "http": 200,
+   "tier": "failsafe",
+   "action": "HOLD",
+   "wall_ms": 10.0,
+   "breaker": "open",
+   "attempts": [
+    "edge-ollama:circuit_open"
+   ]
+  },
+  {
+   "t": 20.04,
+   "http": 200,
+   "tier": "failsafe",
+   "action": "HOLD",
+   "wall_ms": 10.7,
+   "breaker": "open",
+   "attempts": [
+    "edge-ollama:circuit_open"
+   ]
+  },
+  {
+   "t": 21.05,
+   "http": 200,
+   "tier": "failsafe",
+   "action": "HOLD",
+   "wall_ms": 9.5,
+   "breaker": "open",
+   "attempts": [
+    "edge-ollama:circuit_open"
+   ]
+  },
+  {
+   "t": 22.05,
+   "http": 200,
+   "tier": "failsafe",
+   "action": "HOLD",
+   "wall_ms": 10.4,
+   "breaker": "open",
+   "attempts": [
+    "edge-ollama:circuit_open"
+   ]
+  },
+  {
+   "t": 23.06,
+   "http": 200,
+   "tier": "failsafe",
+   "action": "HOLD",
+   "wall_ms": 13.3,
+   "breaker": "open",
+   "attempts": [
+    "edge-ollama:circuit_open"
+   ]
+  },
+  {
+   "t": 24.06,
+   "http": 200,
+   "tier": "failsafe",
+   "action": "HOLD",
+   "wall_ms": 9.6,
+   "breaker": "open",
+   "attempts": [
+    "edge-ollama:circuit_open"
+   ]
+  },
+  {
+   "t": 25.07,
+   "http": 200,
+   "tier": "failsafe",
+   "action": "HOLD",
+   "wall_ms": 13.2,
+   "breaker": "open",
+   "attempts": [
+    "edge-ollama:circuit_open"
+   ]
+  },
+  {
+   "t": 26.07,
+   "http": 200,
+   "tier": "failsafe",
+   "action": "HOLD",
+   "wall_ms": 8.3,
+   "breaker": "open",
+   "attempts": [
+    "edge-ollama:circuit_open"
+   ]
+  },
+  {
+   "t": 27.08,
+   "http": 200,
+   "tier": "failsafe",
+   "action": "HOLD",
+   "wall_ms": 12.9,
+   "breaker": "open",
+   "attempts": [
+    "edge-ollama:circuit_open"
+   ]
+  },
+  {
+   "t": 28.09,
+   "http": 200,
+   "tier": "failsafe",
+   "action": "HOLD",
+   "wall_ms": 12.3,
+   "breaker": "open",
+   "attempts": [
+    "edge-ollama:circuit_open"
+   ]
+  },
+  {
+   "t": 29.09,
+   "http": 200,
+   "tier": "failsafe",
+   "action": "HOLD",
+   "wall_ms": 11.1,
+   "breaker": "open",
+   "attempts": [
+    "edge-ollama:circuit_open"
+   ]
+  },
+  {
+   "t": 30.1,
+   "http": 200,
+   "tier": "failsafe",
+   "action": "HOLD",
+   "wall_ms": 11.4,
+   "breaker": "open",
+   "attempts": [
+    "edge-ollama:circuit_open"
+   ]
+  },
+  {
+   "t": 31.1,
+   "http": 200,
+   "tier": "failsafe",
+   "action": "HOLD",
+   "wall_ms": 2512.4,
+   "breaker": "open",
+   "attempts": [
+    "edge-ollama:TimeoutError"
+   ]
+  },
+  {
+   "t": 33.62,
+   "http": 200,
+   "tier": "failsafe",
+   "action": "HOLD",
+   "wall_ms": 8.5,
+   "breaker": "open",
+   "attempts": [
+    "edge-ollama:circuit_open"
+   ]
+  },
+  {
+   "t": 34.63,
+   "http": 200,
+   "tier": "failsafe",
+   "action": "HOLD",
+   "wall_ms": 13.2,
+   "breaker": "open",
+   "attempts": [
+    "edge-ollama:circuit_open"
+   ]
+  },
+  {
+   "t": 35.63,
+   "http": 200,
+   "tier": "failsafe",
+   "action": "HOLD",
+   "wall_ms": 20.5,
+   "breaker": "open",
+   "attempts": [
+    "edge-ollama:circuit_open"
+   ]
+  },
+  {
+   "t": 36.64,
+   "http": 200,
+   "tier": "failsafe",
+   "action": "HOLD",
+   "wall_ms": 16.8,
+   "breaker": "open",
+   "attempts": [
+    "edge-ollama:circuit_open"
+   ]
+  },
+  {
+   "t": 37.64,
+   "http": 200,
+   "tier": "failsafe",
+   "action": "HOLD",
+   "wall_ms": 10.9,
+   "breaker": "open",
+   "attempts": [
+    "edge-ollama:circuit_open"
+   ]
+  },
+  {
+   "t": 38.65,
+   "http": 200,
+   "tier": "failsafe",
+   "action": "HOLD",
+   "wall_ms": 9.0,
+   "breaker": "open",
+   "attempts": [
+    "edge-ollama:circuit_open"
+   ]
+  },
+  {
+   "t": 39.65,
+   "http": 200,
+   "tier": "failsafe",
+   "action": "HOLD",
+   "wall_ms": 9.7,
+   "breaker": "open",
+   "attempts": [
+    "edge-ollama:circuit_open"
+   ]
+  },
+  {
+   "t": 40.65,
+   "http": 200,
+   "tier": "failsafe",
+   "action": "HOLD",
+   "wall_ms": 9.6,
+   "breaker": "open",
+   "attempts": [
+    "edge-ollama:circuit_open"
+   ]
+  },
+  {
+   "t": 41.66,
+   "http": 200,
+   "tier": "failsafe",
+   "action": "HOLD",
+   "wall_ms": 8.2,
+   "breaker": "open",
+   "attempts": [
+    "edge-ollama:circuit_open"
+   ]
+  },
+  {
+   "t": 42.67,
+   "http": 200,
+   "tier": "failsafe",
+   "action": "HOLD",
+   "wall_ms": 10.7,
+   "breaker": "open",
+   "attempts": [
+    "edge-ollama:circuit_open"
+   ]
+  },
+  {
+   "t": 43.69,
+   "http": 200,
+   "tier": "failsafe",
+   "action": "HOLD",
+   "wall_ms": 12.4,
+   "breaker": "open",
+   "attempts": [
+    "edge-ollama:circuit_open"
+   ]
+  },
+  {
+   "t": 44.69,
+   "http": 200,
+   "tier": "failsafe",
+   "action": "HOLD",
+   "wall_ms": 12.4,
+   "breaker": "open",
+   "attempts": [
+    "edge-ollama:circuit_open"
+   ]
+  },
+  {
+   "t": 45.69,
+   "http": 200,
+   "tier": "failsafe",
+   "action": "HOLD",
+   "wall_ms": 8.2,
+   "breaker": "open",
+   "attempts": [
+    "edge-ollama:circuit_open"
+   ]
+  },
+  {
+   "t": 46.71,
+   "http": 200,
+   "tier": "failsafe",
+   "action": "HOLD",
+   "wall_ms": 10.5,
+   "breaker": "open",
+   "attempts": [
+    "edge-ollama:circuit_open"
+   ]
+  },
+  {
+   "t": 47.72,
+   "http": 200,
+   "tier": "failsafe",
+   "action": "HOLD",
+   "wall_ms": 8.5,
+   "breaker": "open",
+   "attempts": [
+    "edge-ollama:circuit_open"
+   ]
+  },
+  {
+   "t": 48.73,
+   "http": 200,
+   "tier": "edge",
+   "action": "HOLD",
+   "wall_ms": 1014.4,
+   "breaker": "closed",
+   "attempts": [
+    "edge-ollama:ok"
+   ]
+  },
+  {
+   "t": 49.75,
+   "http": 200,
+   "tier": "edge",
+   "action": "HOLD",
+   "wall_ms": 972.9,
+   "breaker": "closed",
+   "attempts": [
+    "edge-ollama:ok"
+   ]
+  },
+  {
+   "t": 50.76,
+   "http": 200,
+   "tier": "edge",
+   "action": "HOLD",
+   "wall_ms": 954.4,
+   "breaker": "closed",
+   "attempts": [
+    "edge-ollama:ok"
+   ]
+  },
+  {
+   "t": 51.76,
+   "http": 200,
+   "tier": "edge",
+   "action": "HOLD",
+   "wall_ms": 953.6,
+   "breaker": "closed",
+   "attempts": [
+    "edge-ollama:ok"
+   ]
+  },
+  {
+   "t": 52.77,
+   "http": 200,
+   "tier": "edge",
+   "action": "HOLD",
+   "wall_ms": 950.2,
+   "breaker": "closed",
+   "attempts": [
+    "edge-ollama:ok"
+   ]
+  },
+  {
+   "t": 53.78,
+   "http": 200,
+   "tier": "edge",
+   "action": "HOLD",
+   "wall_ms": 943.0,
+   "breaker": "closed",
+   "attempts": [
+    "edge-ollama:ok"
+   ]
+  },
+  {
+   "t": 54.79,
+   "http": 200,
+   "tier": "edge",
+   "action": "HOLD",
+   "wall_ms": 917.7,
+   "breaker": "closed",
+   "attempts": [
+    "edge-ollama:ok"
+   ]
+  },
+  {
+   "t": 55.79,
+   "http": 200,
+   "tier": "edge",
+   "action": "HOLD",
+   "wall_ms": 944.1,
+   "breaker": "closed",
+   "attempts": [
+    "edge-ollama:ok"
+   ]
+  },
+  {
+   "t": 56.81,
+   "http": 200,
+   "tier": "edge",
+   "action": "HOLD",
+   "wall_ms": 931.3,
+   "breaker": "closed",
+   "attempts": [
+    "edge-ollama:ok"
+   ]
+  },
+  {
+   "t": 57.81,
+   "http": 200,
+   "tier": "edge",
+   "action": "HOLD",
+   "wall_ms": 915.9,
+   "breaker": "closed",
+   "attempts": [
+    "edge-ollama:ok"
+   ]
+  },
+  {
+   "t": 58.82,
+   "http": 200,
+   "tier": "edge",
+   "action": "HOLD",
+   "wall_ms": 931.2,
+   "breaker": "closed",
+   "attempts": [
+    "edge-ollama:ok"
+   ]
+  },
+  {
+   "t": 59.83,
+   "http": 200,
+   "tier": "edge",
+   "action": "HOLD",
+   "wall_ms": 923.5,
+   "breaker": "closed",
+   "attempts": [
+    "edge-ollama:ok"
+   ]
+  },
+  {
+   "t": 60.83,
+   "http": 200,
+   "tier": "edge",
+   "action": "HOLD",
+   "wall_ms": 940.1,
+   "breaker": "closed",
+   "attempts": [
+    "edge-ollama:ok"
+   ]
+  },
+  {
+   "t": 61.85,
+   "http": 200,
+   "tier": "edge",
+   "action": "HOLD",
+   "wall_ms": 943.1,
+   "breaker": "closed",
+   "attempts": [
+    "edge-ollama:ok"
+   ]
+  },
+  {
+   "t": 62.85,
+   "http": 200,
+   "tier": "edge",
+   "action": "HOLD",
+   "wall_ms": 933.9,
+   "breaker": "closed",
+   "attempts": [
+    "edge-ollama:ok"
+   ]
+  },
+  {
+   "t": 63.87,
+   "http": 200,
+   "tier": "edge",
+   "action": "HOLD",
+   "wall_ms": 939.9,
+   "breaker": "closed",
+   "attempts": [
+    "edge-ollama:ok"
+   ]
+  },
+  {
+   "t": 64.88,
+   "http": 200,
+   "tier": "edge",
+   "action": "HOLD",
+   "wall_ms": 944.4,
+   "breaker": "closed",
+   "attempts": [
+    "edge-ollama:ok"
+   ]
+  },
+  {
+   "t": 65.88,
+   "http": 200,
+   "tier": "edge",
+   "action": "HOLD",
+   "wall_ms": 958.2,
+   "breaker": "closed",
+   "attempts": [
+    "edge-ollama:ok"
+   ]
+  },
+  {
+   "t": 66.89,
+   "http": 200,
+   "tier": "edge",
+   "action": "HOLD",
+   "wall_ms": 986.8,
+   "breaker": "closed",
+   "attempts": [
+    "edge-ollama:ok"
+   ]
+  },
+  {
+   "t": 67.89,
+   "http": 200,
+   "tier": "edge",
+   "action": "HOLD",
+   "wall_ms": 956.9,
+   "breaker": "closed",
+   "attempts": [
+    "edge-ollama:ok"
+   ]
+  },
+  {
+   "t": 68.89,
+   "http": 200,
+   "tier": "edge",
+   "action": "HOLD",
+   "wall_ms": 931.9,
+   "breaker": "closed",
+   "attempts": [
+    "edge-ollama:ok"
+   ]
+  },
+  {
+   "t": 69.9,
+   "http": 200,
+   "tier": "edge",
+   "action": "HOLD",
+   "wall_ms": 929.7,
+   "breaker": "closed",
+   "attempts": [
+    "edge-ollama:ok"
+   ]
+  },
+  {
+   "t": 70.9,
+   "http": 200,
+   "tier": "edge",
+   "action": "HOLD",
+   "wall_ms": 929.6,
+   "breaker": "closed",
+   "attempts": [
+    "edge-ollama:ok"
+   ]
+  },
+  {
+   "t": 71.91,
+   "http": 200,
+   "tier": "edge",
+   "action": "HOLD",
+   "wall_ms": 943.7,
+   "breaker": "closed",
+   "attempts": [
+    "edge-ollama:ok"
+   ]
+  },
+  {
+   "t": 72.91,
+   "http": 200,
+   "tier": "edge",
+   "action": "HOLD",
+   "wall_ms": 937.6,
+   "breaker": "closed",
+   "attempts": [
+    "edge-ollama:ok"
+   ]
+  },
+  {
+   "t": 73.92,
+   "http": 200,
+   "tier": "edge",
+   "action": "HOLD",
+   "wall_ms": 957.7,
+   "breaker": "closed",
+   "attempts": [
+    "edge-ollama:ok"
+   ]
+  },
+  {
+   "t": 74.93,
+   "http": 200,
+   "tier": "edge",
+   "action": "HOLD",
+   "wall_ms": 933.1,
+   "breaker": "closed",
+   "attempts": [
+    "edge-ollama:ok"
+   ]
+  },
+  {
+   "t": 75.95,
+   "http": 200,
+   "tier": "edge",
+   "action": "HOLD",
+   "wall_ms": 957.9,
+   "breaker": "closed",
+   "attempts": [
+    "edge-ollama:ok"
+   ]
+  },
+  {
+   "t": 76.95,
+   "http": 200,
+   "tier": "edge",
+   "action": "HOLD",
+   "wall_ms": 947.0,
+   "breaker": "closed",
+   "attempts": [
+    "edge-ollama:ok"
+   ]
+  },
+  {
+   "t": 77.95,
+   "http": 200,
+   "tier": "edge",
+   "action": "HOLD",
+   "wall_ms": 935.9,
+   "breaker": "closed",
+   "attempts": [
+    "edge-ollama:ok"
+   ]
+  },
+  {
+   "t": 78.96,
+   "http": 200,
+   "tier": "edge",
+   "action": "HOLD",
+   "wall_ms": 893.3,
+   "breaker": "closed",
+   "attempts": [
+    "edge-ollama:ok"
+   ]
+  },
+  {
+   "t": 79.96,
+   "http": 200,
+   "tier": "edge",
+   "action": "HOLD",
+   "wall_ms": 953.6,
+   "breaker": "closed",
+   "attempts": [
+    "edge-ollama:ok"
+   ]
+  },
+  {
+   "t": 80.97,
+   "http": 200,
+   "tier": "edge",
+   "action": "HOLD",
+   "wall_ms": 956.5,
+   "breaker": "closed",
+   "attempts": [
+    "edge-ollama:ok"
+   ]
+  },
+  {
+   "t": 81.97,
+   "http": 200,
+   "tier": "edge",
+   "action": "HOLD",
+   "wall_ms": 921.3,
+   "breaker": "closed",
+   "attempts": [
+    "edge-ollama:ok"
+   ]
+  },
+  {
+   "t": 82.97,
+   "http": 200,
+   "tier": "edge",
+   "action": "HOLD",
+   "wall_ms": 952.9,
+   "breaker": "closed",
+   "attempts": [
+    "edge-ollama:ok"
+   ]
+  },
+  {
+   "t": 83.97,
+   "http": 200,
+   "tier": "edge",
+   "action": "HOLD",
+   "wall_ms": 986.5,
+   "breaker": "closed",
+   "attempts": [
+    "edge-ollama:ok"
+   ]
+  },
+  {
+   "t": 84.98,
+   "http": 200,
+   "tier": "edge",
+   "action": "HOLD",
+   "wall_ms": 906.3,
+   "breaker": "closed",
+   "attempts": [
+    "edge-ollama:ok"
+   ]
+  },
+  {
+   "t": 85.98,
+   "http": 200,
+   "tier": "edge",
+   "action": "HOLD",
+   "wall_ms": 952.4,
+   "breaker": "closed",
+   "attempts": [
+    "edge-ollama:ok"
+   ]
+  },
+  {
+   "t": 86.99,
+   "http": 200,
+   "tier": "edge",
+   "action": "HOLD",
+   "wall_ms": 936.4,
+   "breaker": "closed",
+   "attempts": [
+    "edge-ollama:ok"
+   ]
+  },
+  {
+   "t": 88.0,
+   "http": 200,
+   "tier": "edge",
+   "action": "HOLD",
+   "wall_ms": 985.0,
+   "breaker": "closed",
+   "attempts": [
+    "edge-ollama:ok"
+   ]
+  },
+  {
+   "t": 89.0,
+   "http": 200,
+   "tier": "edge",
+   "action": "HOLD",
+   "wall_ms": 1300.6,
+   "breaker": "closed",
+   "attempts": [
+    "edge-ollama:ok"
+   ]
+  }
+ ]
+}

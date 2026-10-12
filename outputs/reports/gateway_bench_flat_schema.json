@@ -1,0 +1,68 @@
+{
+  "source": "Kaggle: Quality Prediction in a Mining Process",
+  "seed": 42,
+  "results": [
+    {
+      "model": "qwen2.5:1.5b-instruct",
+      "n": 60,
+      "deadline_s": 3.0,
+      "valid_pct": 90.0,
+      "physics_rejected_pct": 0.0,
+      "contract_failure_pct": 10.0,
+      "outcomes": {
+        "1.5b-instruct": 6,
+        "valid": 54
+      },
+      "rejection_breakdown_no_deadline": {
+        "valid": 55,
+        "shape: <root>": 5
+      },
+      "actions": {
+        "HOLD": 60
+      },
+      "tiers": {
+        "failsafe": 6,
+        "edge": 54
+      },
+      "latency_ms": {
+        "p50": 789.0,
+        "p95": 1156.8,
+        "max": 1766.6
+      },
+      "audit_chain_ok": true,
+      "set": "random",
+      "wall_s": 100.9
+    },
+    {
+      "model": "qwen2.5:1.5b-instruct",
+      "n": 60,
+      "deadline_s": 3.0,
+      "valid_pct": 83.3,
+      "physics_rejected_pct": 0.0,
+      "contract_failure_pct": 16.7,
+      "outcomes": {
+        "1.5b-instruct": 10,
+        "valid": 50
+      },
+      "rejection_breakdown_no_deadline": {
+        "shape: <root>": 10,
+        "valid": 50
+      },
+      "actions": {
+        "HOLD": 60
+      },
+      "tiers": {
+        "failsafe": 10,
+        "edge": 50
+      },
+      "latency_ms": {
+        "p50": 754.9,
+        "p95": 1163.1,
+        "max": 1197.5
+      },
+      "audit_chain_ok": true,
+      "set": "high_silica",
+      "wall_s": 100.3
+    }
+  ]
+}

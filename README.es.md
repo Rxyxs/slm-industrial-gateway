@@ -10,6 +10,15 @@ herramientas analíticas (DuckDB, detección de anomalías, cálculo de RUL) y
 guardrails de seguridad. Diseñado para desplegarse on-prem, sin dependencia
 de red para la ruta de inferencia.
 
+El repo tiene dos servicios que comparten el dominio pero no el camino de código:
+
+- **Gateway de chat** (`src/api`, `src/agents`, …): chat compatible con OpenAI con
+  herramientas, descrito en [Arquitectura](#arquitectura).
+- **Gateway de planta** (`src/gateway`): entra telemetría por MQTT / OPC UA / Modbus /
+  REST y sale una acción validada (`HOLD`, `ADJUST_SETPOINT`, `RAISE_ALARM`) dentro de un
+  deadline de 3 s, con ruteo borde→nube, circuit breakers, filtro de prompt injection y
+  auditoría a prueba de manipulación. Ver [Gateway de planta](#gateway-de-planta-srcgateway).
+
 ## Arquitectura
 
 El sistema se compone de seis módulos independientes bajo `src/`, integrados
@@ -329,6 +338,257 @@ El JSON completo (los 100 resultados individuales, con el detalle exacto de
 cada bloqueo) queda versionado en
 [`outputs/reports/eval_metrics.json`](outputs/reports/eval_metrics.json).
 
+## Gateway de planta (`src/gateway`)
+
+Un segundo servicio en este repo, separado del gateway de chat de arriba: se ubica entre
+la planta (PLCs, SCADA, telemetría MQTT) y uno o más motores SLM, y convierte una foto de
+telemetría en **una acción que un PLC puede ejecutar** — `HOLD`, `ADJUST_SETPOINT` o
+`RAISE_ALARM` — dentro de un deadline acotado. No carga modelos: consume Ollama, vLLM o
+cualquier motor compatible con OpenAI por HTTP, así que su imagen no lleva CUDA y corre
+igual en un IPC x86 que en un Jetson.
+
+### Por qué el contrato de salida es todo el diseño
+
+Un SLM que escribe prosa no le sirve a un PLC, y uno que escribe un setpoint plausible es
+peligroso. Correr modelos reales sobre datos reales de planta mostró tres formas en que un
+modelo restringido igual falla, y cada una definió una capa del gateway:
+
+1. **La decodificación guiada por gramática no hace cumplir todo el schema.** Con un schema
+   plano (`confidence: float` en [0, 1], `target_tag` opcional), qwen2.5:1.5b devolvió
+   `confidence: 3` y `HOLD` *con* un setpoint adjunto: la gramática que Ollama arma desde el
+   JSON Schema respeta tipos y enums, pero ignora `minimum`, `maximum`, `maxLength` y las
+   reglas entre campos. Eso fue falla de contrato en **10% de las horas al azar y
+   16,7% de las horas de sílice alta**.
+   La corrección fue expresar las reglas con lo que la gramática *sí* hace cumplir: la salida
+   del modelo es una unión discriminada (`HoldOutput | AdjustOutput | AlarmOutput`, por
+   `action`) donde la variante HOLD no tiene campos de setpoint, y la confianza es
+   `LOW | MEDIUM | HIGH`. Mismo modelo, mismas horas: 0% / 0%.
+2. **Una respuesta con forma válida puede ser físicamente insegura.** Cada `ADJUST_SETPOINT`
+   se verifica en código contra el rango del tag y contra `max_step` desde la lectura
+   *actual*. Ambos salen de los datos, no de un manual: p1/p99 de cada variable y p99 del
+   cambio entre lecturas consecutivas en el dataset de la planta (`src/gateway/tags.py`).
+   Si falla, se convierte en `HOLD` y el router **no** prueba otro motor: buscar un backend
+   que apruebe un movimiento inseguro es justo lo que no debe hacer.
+3. **Una respuesta válida y segura puede justificarse con algo falso.** La explicación libre
+   de los modelos contradecía la telemetría ("pH fuera de rango" con pH 10,13 dentro de
+   [8,75; 10,6]). Por eso el `reason_code` estructurado se verifica en código: un cambio de
+   setpoint cuya premisa los datos desmienten no se ejecuta, y un HOLD o alarma con premisa
+   falsa pasa con un aviso en la respuesta y en la auditoría.
+
+### Arquitectura
+
+```
+ Sensores / PLCs                    Gateway de planta (src/gateway)                   Motores SLM
+ ───────────────                    ───────────────────────────────                   ───────────
+ Servidor OPC UA ─┐                                                                  ┌─ Ollama (GPU)  borde
+ Modbus TCP   ────┼─ field.py ──┐  ┌──────────────────────────────────────────┐     ├─ vLLM          borde
+                  │  (lectura)  │  │ security.py   API key · mTLS (uvicorn)   │     └─ OpenAI-compat nube
+ Broker MQTT ─────┼─ mqtt_      ├─▶│               reglas anti prompt-injection│          (apagada por defecto)
+  plant/+/        │  bridge.py  │  │ resilience.py token bucket · caché (Redis)│
+  telemetry       │             │  │ router.py     complejidad → plan          │     por motor:
+ REST/SCADA ──────┴─ app.py ────┘  │               single-flight por clave     │──▶  CircuitBreaker
+  POST /v1/infer                   │               presupuesto deadline (3 s)  │     (closed/open/half-open)
+  POST /v1/jobs ── jobs.py ───────▶│               recarga al abrir breaker    │◀──  JSON ModelOutput
+  (cola Redis, N workers)          │ validation.py schema · física · premisa   │     (guided decoding)
+                                   │ audit.py      DuckDB, cadena SHA-256      │
+                                   └───────────────┬──────────────────────────┘
+                                                   │ ControlAction validada
+             Actuadores / SCADA                    ▼
+             ──────────────────    plant/<asset>/recommendation (MQTT, QoS 1)
+             Setpoint del PLC  ◀── escritura field.py — solo si mode=closed_loop
+                                   Y ALLOW_PLC_WRITEBACK=true Y acción validada
+                                   Y no viene de caché/failsafe
+```
+
+Camino de `POST /v1/infer` (el puente MQTT llama al mismo router):
+
+1. Pydantic valida la solicitud: solo tags conocidos, valores finitos, ≤ 64 lecturas.
+2. La nota del operador (único texto libre) se normaliza (NFKC, sin caracteres de control
+   ni de ancho cero) y se revisa contra reglas de inyección. Si se marca, se descarta, la
+   telemetría igual se evalúa y el evento queda auditado.
+3. Búsqueda en caché con una clave que agrupa cada lectura en buckets del 1% del rango del
+   tag. Un acierto se re-verifica contra la física con las lecturas *actuales*. Las
+   solicitudes idénticas que ya están en vuelo esperan ese resultado en vez de volver a
+   pegarle al GPU.
+4. Un puntaje de complejidad (lecturas fuera de rango, calidad mala, largo de la nota)
+   elige el plan: borde primero; nube primero solo sobre el umbral y solo con
+   `ALLOW_CLOUD=true`.
+5. Cada motor se llama a través de su circuit breaker con lo que queda del deadline.
+   Timeout, error de conexión, breaker abierto o salida fuera de contrato → siguiente motor.
+   Sin opciones → `HOLD` con `tier=failsafe`. El SCADA siempre recibe un 200 y una acción
+   dentro del deadline, nunca un 5xx porque un modelo se cayó.
+6. La acción se valida (schema → física → premisa), se audita y solo entonces se escribe,
+   opcionalmente, al PLC.
+
+### Resultados (modelos reales, datos reales de planta)
+
+Medido en una RTX 4060 Ti 8 GB con Ollama 0.12.6, a través del mismo `InferenceRouter` que
+usa el servicio (deadline 3 s). Telemetría: promedios horarios del
+[dataset público de la planta de flotación](https://www.kaggle.com/datasets/edumagalhaes/quality-prediction-in-a-mining-process)
+(737.453 filas, marzo–septiembre 2017), 60 horas al azar y 60 horas del decil superior de
+sílice en concentrado (≥ 4,14%), semilla 42. Se reproduce con
+`python scripts/bench_gateway.py`; los números crudos están en
+`outputs/reports/gateway_bench.json`.
+
+![Benchmark del gateway](docs/figures/gateway_bench.png)
+
+| Modelo | Conjunto | Contrato válido | Premisa contradicha | Failsafe | Acciones | p50 / p95 (ms) |
+|---|---|---|---|---|---|---|
+| `qwen2.5:0.5b-instruct` | al azar | 100% | 50% | 0% | RAISE_ALARM 60 | 932 / 1733 |
+| `qwen2.5:1.5b-instruct` | al azar | 100% | 100% | 0% | HOLD 60 | 1908 / 2048 |
+| `qwen2.5:3b-instruct` | al azar | 100% | 0% | 0% | HOLD 60 | 1829 / 2084 |
+| `llama3.2:3b` | al azar | 96,7% | 0% | 3,3% | HOLD 60 | 1673 / 1938 |
+| `phi3.5:3.8b` | al azar | 0% | 0% | 100% | HOLD 60 | 3010 / 3019 |
+| `qwen2.5:0.5b-instruct` | sílice alta | 100% | 40% | 0% | RAISE_ALARM 60 | 897 / 1663 |
+| `qwen2.5:1.5b-instruct` | sílice alta | 100% | 100% | 0% | HOLD 60 | 1760 / 2002 |
+| `qwen2.5:3b-instruct` | sílice alta | 100% | 0% | 0% | HOLD 60 | 1617 / 2076 |
+| `llama3.2:3b` | sílice alta | 98,3% | 0% | 1,7% | HOLD 60 | 1420 / 1898 |
+| `phi3.5:3.8b` | sílice alta | 0% | 0% | 100% | HOLD 60 | 3013 / 3020 |
+
+
+El dataset no trae una etiqueta de "acción correcta", así que esto mide lo que el gateway
+puede garantizar — cumplimiento de contrato, seguridad física, latencia — no la calidad de
+la decisión.
+
+Lo que dicen los números:
+
+- **Contrato**: con el schema de unión, qwen2.5 0.5b/1.5b/3b produjeron una acción válida
+  siempre; llama3.2:3b falló una vez por conjunto con un JSON cortado por el deadline.
+  phi3.5:3.8b no cabe: superó el deadline de 3 s en 60/60 horas, e incluso con 30 s de
+  presupuesto se pasó en 29/60 (al azar) y 28/60 (sílice alta), así que no es un modelo de
+  lazo de control en este GPU.
+- **Física**: ninguna respuesta propuso `ADJUST_SETPOINT`, así que las verificaciones
+  físicas no rechazaron nada (0% en todas las filas). **Ningún modelo, en ninguna hora
+  —incluidas las 60 horas con sílice promedio de 4,77%— propuso mover un setpoint de
+  reactivo.** Detrás hay tres comportamientos distintos: qwen2.5:0.5b levantó alarma en
+  todas las horas, qwen2.5:1.5b siempre mantuvo pero citando un motivo que los datos
+  contradicen (100% de las horas), y los modelos de 3B mantuvieron con un motivo
+  consistente. Un SLM con solo una foto de telemetría y reglas genéricas es conservador
+  hasta no aportar información: el gateway lo vuelve seguro, no útil. Para que sea útil
+  hace falta contexto propio de la planta (el soft sensor, tendencias recientes, historial
+  de operadores) o fine-tuning, no un guardrail más grande.
+- **La verificación de premisas se gana su lugar**: sin ella, qwen2.5:1.5b se vería como un
+  modelo perfecto (100% válido, HOLDs razonables) estando equivocado en el *por qué* en
+  todas las horas. La latencia varió entre corridas en el mismo hardware (p50 de
+  qwen2.5:0.5b fue 567 ms en una corrida previa y 932 ms en esta); la tabla es la corrida
+  guardada en el JSON.
+
+
+#### Caída del motor
+
+`scripts/failover_demo.py` envía una hora real de planta por segundo al stack desplegado,
+detiene el contenedor de Ollama y lo vuelve a levantar:
+
+![Línea de tiempo de la caída](docs/figures/gateway_failover.png)
+
+81 solicitudes, **81 HTTP 200, ninguna sobre 2,52 s** (deadline 3 s). Las primeras fallas
+tras la detención costaron hasta un timeout completo del motor (2,5 s); a la tercera el breaker se
+abrió y el HOLD failsafe volvió con mediana de **10,7 ms** sin esperar al motor caído. La
+sonda half-open 15 s después falló una vez más (el motor seguía abajo) y reabrió el breaker.
+El motor volvió en t = 36 s sin el modelo cargado; la recarga en segundo plano lo cargó con
+el breaker aún abierto, así que la sonda siguiente (t = 48,7 s) funcionó y el borde volvió a
+~950 ms de mediana, sin intervención manual. Durante esas 34 respuestas failsafe el PLC
+recibió un `HOLD` válido cada segundo: nunca un error, nunca un timeout.
+
+### Endpoints
+
+| Método | Ruta | Propósito |
+|---|---|---|
+| `POST` | `/v1/infer` | Inferencia síncrona acotada por `GATEWAY_DEADLINE_S`. Cuerpo: `InferenceRequest`. Devuelve `InferenceResponse`; headers `X-Request-ID`, `X-PLC-Written`, `X-PLC-Write-Note`. |
+| `POST` | `/v1/jobs` | Inferencia diferida (reportes de turno, diagnóstico por lotes) → `202 {"job_id"}`. Corre en un pool fijo de workers para no competir con el lazo de control por el GPU. |
+| `GET` | `/v1/jobs/{job_id}` | `queued` / `running` / `done` (con resultado) / `failed`. |
+| `GET` | `/v1/backends` | Estado del circuit breaker por motor y estado del warm-up. |
+| `GET` | `/v1/audit?limit=50` | Últimas decisiones más `chain_ok` (verificación de la cadena de hashes). |
+| `GET` | `/v1/schema` | JSON Schemas: `scada_action` (lo que parsea el PLC) y `model_output` (lo que se le impone al motor). |
+| `GET` | `/health` | Liveness; no toca los motores. |
+| `GET` | `/metrics` | Prometheus: `slmgw_inference_total{tier,action,degraded}`, `slmgw_inference_latency_seconds`, `slmgw_rate_limited_total`. |
+
+Todos los endpoints salvo `/health`, `/metrics` y `/v1/schema` exigen `X-API-Key` cuando
+`GATEWAY_API_KEYS` está definido. Los errores son `{"error": ..., "type": ...}`; el `429`
+trae `Retry-After`.
+
+```bash
+curl -s -H "X-API-Key: $KEY" -H "Content-Type: application/json" localhost:8080/v1/infer -d '{
+  "asset_id": "flot-col-01", "mode": "advisory",
+  "telemetry": [{"tag": "amina_flow", "value": 557.4}, {"tag": "ore_pulp_ph", "value": 10.07},
+                {"tag": "silica_concentrate_pct", "value": 4.9}]}'
+```
+
+MQTT: publicar un `InferenceRequest` en `plant/<asset_id>/telemetry`; la respuesta llega en
+`plant/<asset_id>/recommendation` (QoS 1) con `plc_written` y `plc_write_note` agregados.
+Un payload mal formado, o un `asset_id` que no coincide con el tópico, se responde en
+`plant/<asset_id>/rejected`.
+
+### Guía de despliegue en planta
+
+```bash
+cp deploy/edge/.env.example deploy/edge/.env     # como mínimo, GATEWAY_API_KEYS
+docker compose -f deploy/edge/docker-compose.yml up -d --build
+curl -s -H "X-API-Key: <clave>" localhost:8080/v1/backends   # warmup: {"edge-ollama": "ready"}
+python scripts/replay_flotation.py --csv data/flotation/MiningProcess_Flotation_Plant_Database.csv --n 20
+```
+
+El stack es el gateway, Mosquitto, Redis (AOF activo, tope LRU) y Ollama con reserva de
+GPU; `ollama-pull` descarga el modelo una vez a un volumen. `--profile vllm` agrega un
+servidor vLLM con guided decoding xgrammar (apuntar `EDGE_VLLM_URL` a él); ese perfil está
+declarado pero no se corrió para los resultados de arriba. En un Jetson, construir la imagen
+del gateway para `linux/arm64`
+(`docker buildx build --platform linux/arm64 -f deploy/edge/Dockerfile .`) y reemplazar el
+servicio `ollama` por una versión compatible con JetPack.
+
+Checklist antes de conectar a una planta real:
+
+- **La escritura queda apagada** (`ALLOW_PLC_WRITEBACK=false`) hasta que el modo asesor
+  haya corrido lo suficiente para que operaciones confíe en él. Escribir exige además
+  `mode=closed_loop` en la solicitud, un `ADJUST_SETPOINT` validado y una respuesta que no
+  venga de caché ni de failsafe; `FieldWriter.apply()` vuelve a verificar las cuatro.
+- **Registro de tags**: reemplazar los límites de `src/gateway/tags.py` por la envolvente
+  operativa de la planta y los node ids OPC UA / registros Modbus y escalas del PLC.
+- **mTLS**: dejar `server.crt`, `server.key` y la CA de planta en `deploy/edge/tls/` y
+  definir `TLS_CERT_FILE`, `TLS_KEY_FILE`, `TLS_CA_FILE`; uvicorn exige entonces un
+  certificado de cliente firmado por esa CA antes de que cualquier solicitud llegue a la API.
+- **MQTT**: el `mosquitto.conf` incluido es de demostración (anónimo en la red interna).
+  Activar `password_file` y el listener TLS en 8883.
+- **Seguridad OPC UA**: definir `OPCUA_SECURITY`, p. ej. `Basic256Sha256,SignAndEncrypt,cert.der,key.pem`.
+- **Red aislada**: dejar `ALLOW_CLOUD=false` (default). El router nunca planifica una
+  llamada a la nube, sea cual sea el puntaje de complejidad.
+- **Auditoría**: el archivo DuckDB vive en el volumen `audit-data`. Respaldarlo;
+  `GET /v1/audit` reporta `chain_ok=false` y el primer `seq` roto si alguna fila se editó o
+  borró.
+
+Las variables de entorno están en la tabla de la versión en inglés de este README
+(los nombres son los mismos).
+
+### Pruebas de integración
+
+```bash
+python -m venv venv && venv/Scripts/pip install -r requirements-gateway-dev.txt   # Linux: venv/bin/pip
+pytest tests/gateway -v
+```
+
+81 pruebas, sin GPU ni red:
+
+| Archivo | Qué ejercita |
+|---|---|
+| `test_validation.py` | Contrato de salida del modelo, límites y pasos físicos, premisas, forma del schema guiado. |
+| `test_breaker.py` | Transiciones closed → open → half-open → closed/open con reloj inyectado. |
+| `test_router.py` | Fallback borde→nube, breaker que salta un motor caído, corte por deadline, failsafe, sin buscar otro backend tras un rechazo físico, inyección, caché, single-flight, recarga, concurrencia + cadena de auditoría intacta. |
+| `test_security_audit.py` | Reglas de inyección (inglés/español, ancho cero escondido), notas operativas benignas, API keys, token bucket, cadena de hashes entre reinicios y detección de manipulación. |
+| `test_api.py` | Contrato REST: 401/422/429, control de escritura, setpoint inseguro nunca escrito, jobs, auditoría, métricas. |
+| `test_protocols.py` | Servidor OPC UA real (asyncua) y esclavo Modbus TCP real (pymodbus) en sockets locales: lectura, escritura, escala de registros, lazo cerrado Modbus → router → Modbus; ruteo del puente MQTT; caché y cola en Redis (fakeredis). |
+
+El job de CI `plant-gateway` corre esta suite y construye la imagen de borde.
+
+### Datos
+
+Los scripts de benchmark y replay leen el dataset de Kaggle
+[Quality Prediction in a Mining Process](https://www.kaggle.com/datasets/edumagalhaes/quality-prediction-in-a-mining-process)
+(`edumagalhaes`, CC0-1.0). No se guarda en el repositorio:
+
+```bash
+kaggle datasets download -d edumagalhaes/quality-prediction-in-a-mining-process -p data/flotation --unzip
+```
+
 ## Estructura del repositorio
 
 ```
@@ -367,6 +627,11 @@ outputs/
                    gguf_benchmark.json (última corrida real de CPU),
                    eval_metrics.json (evaluación offline real, 100 prompts) y
                    finetuning_metrics.json (estado verificado del pipeline QLoRA)
+  gateway/      Gateway de planta: router, breaker, backends (Ollama/OpenAI-compatible),
+                schemas + validación, seguridad, caché/rate limit, jobs, auditoría
+                DuckDB, protocols/ (puente MQTT, OPC UA, Modbus TCP), serve.py
+deploy/edge/    Dockerfile (CPU, amd64/arm64) y docker-compose.yml (gateway +
+                Mosquitto + Redis + Ollama GPU, perfil vLLM opcional)
 monitoring/
   prometheus.yml  Configuración de scraping para el contenedor Prometheus
 tests/
@@ -510,7 +775,8 @@ expone a la red pública por defecto.
 ## Pruebas
 
 ```bash
-pytest -v
+pytest -v --ignore=tests/gateway   # gateway de chat (requirements.txt)
+pytest -v tests/gateway            # gateway de planta (requirements-gateway-dev.txt)
 ```
 
 Por módulo:
