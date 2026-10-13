@@ -43,8 +43,8 @@ class TokenBucketLimiter:
         return False, wait
 
 
-def cache_key(req: InferenceRequest) -> str:
-    parts: list[Any] = [req.asset_id, req.mode, req.operator_note.strip().lower()]
+def cache_key(req: InferenceRequest, context: str = "") -> str:
+    parts: list[Any] = [req.asset_id, req.mode, req.operator_note.strip().lower(), context]
     for s in sorted(req.telemetry, key=lambda x: x.tag):
         spec = TAG_REGISTRY[s.tag]
         resolution = (spec.high - spec.low) / 100.0

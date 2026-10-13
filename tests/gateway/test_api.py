@@ -122,3 +122,33 @@ def test_audit_backends_schema_metrics(make_client):
     schemas = c.get("/v1/schema").json()
     assert set(schemas) == {"scada_action", "model_output"}
     assert "slmgw_inference_total" in c.get("/metrics").text
+
+
+def test_lab_endpoint_feeds_context(make_client):
+    c = make_client()
+    lab = {"asset_id": "flot-col-01", "sampled_at": "2017-08-01T03:00:00", "silica_pct": 4.6}
+    r = c.post("/v1/lab", json=lab, headers=KEY)
+    assert r.status_code == 202 and r.json()["labs_held"] == 1
+    assert c.post("/v1/lab", json={k: v for k, v in lab.items() if k != "asset_id"},
+                  headers=KEY).status_code == 422
+    assert c.post("/v1/lab", json=lab | {"silica_pct": 140}, headers=KEY).status_code == 422
+    # Tres horas cerradas de telemetría -> el gateway ya puede armar hechos.
+    for h in range(4):
+        b = body() | {"telemetry": [{"tag": "amina_flow", "value": 500 + h, "ts": f"2017-08-01T0{h + 4}:10:00"},
+                                    {"tag": "ore_pulp_ph", "value": 10.0, "ts": f"2017-08-01T0{h + 4}:10:00"}]}
+        c.post("/v1/infer", json=b, headers=KEY)
+    ctx = c.get("/v1/context/flot-col-01", headers=KEY).json()
+    assert ctx["hours"] == 3 and ctx["labs"] == 1
+    ids = [f["id"] for f in ctx["facts"]]
+    assert "lab_last" in ids and "amina_flow" in ids
+    # Una muestra de las 05:00 llega a las 07:00: con la última hora cerrada a las 06:00
+    # todavía no existe para el modelo.
+    c.post("/v1/lab", json=lab | {"sampled_at": "2017-08-01T05:00:00", "silica_pct": 1.0}, headers=KEY)
+    facts = {f["id"]: f for f in c.get("/v1/context/flot-col-01", headers=KEY).json()["facts"]}
+    assert facts["lab_last"]["value"] == 4.6
+
+
+def test_request_history_is_validated(make_client):
+    c = make_client()
+    bad = body() | {"history": [{"ts": "2017-08-01T00:00:00", "values": {"made_up": 1.0}}]}
+    assert c.post("/v1/infer", json=bad, headers=KEY).status_code == 422

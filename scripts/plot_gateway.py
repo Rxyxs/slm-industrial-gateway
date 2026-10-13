@@ -92,8 +92,42 @@ def failover() -> None:
     fig.savefig(FIGS / "gateway_failover.png", dpi=150)
 
 
+VARIANT_LABEL = {"A": "A snapshot", "B": "B context", "C": "C + few-shot", "D": "D tools",
+                 "E": "E + derived state", "F": "F procedure gate"}
+
+
+def utility() -> None:
+    path = REPORTS / "utility_eval.json"
+    if not path.exists():
+        return
+    data = json.loads(path.read_text())["results"]
+    models = ["qwen2.5:1.5b-instruct", "qwen2.5:3b-instruct", "llama3.2:3b", "qwen2.5:0.5b-instruct"]
+    fig, axes = plt.subplots(1, 4, figsize=(17, 4.3), sharey=True)
+    series = [("adjust_recall_pct", AQUA, "correct adjustment (40 hours that need it)"),
+              ("near_miss_false_adjust_pct", ORANGE, "adjusts when the procedure says wait (40 near-miss)"),
+              ("adjust_wrong_direction_pct", YELLOW, "adjusts the wrong way (lowers amine)"),
+              ("alarm_on_calm_pct", BLUE, "alarm on a calm hour (40 calm)")]
+    w = 0.2
+    for ax, model in zip(axes, models):
+        rows = {r["variant"]: r for r in data if r["model"] == model}
+        vs = [v for v in "ABCDEF" if v in rows]
+        for k, (key, color, label) in enumerate(series):
+            xs = [i + (k - 1.5) * w for i in range(len(vs))]
+            ax.bar(xs, [rows[v][key] for v in vs], width=w, color=color, label=label,
+                   edgecolor="white", linewidth=1)
+        ax.set_xticks(range(len(vs)), vs)
+        ax.set_ylim(0, 105)
+        ax.set_title(model, loc="left", color=INK, fontweight="bold")
+        ax.grid(axis="x", visible=False)
+    axes[0].set_ylabel("% of hours")
+    axes[0].legend(loc="upper left", bbox_to_anchor=(0, -0.12), ncol=4, frameon=False)
+    fig.text(0.5, -0.12, "  ".join(VARIANT_LABEL.values()), ha="center", fontsize=9, color=MUTED)
+    fig.savefig(FIGS / "utility_ablation.png", dpi=150, bbox_inches="tight")
+
+
 if __name__ == "__main__":
     FIGS.mkdir(parents=True, exist_ok=True)
     bench()
     failover()
+    utility()
     print("figures written to", FIGS)

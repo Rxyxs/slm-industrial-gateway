@@ -336,8 +336,9 @@ constrained model still fails, and each one shaped a layer of the gateway:
 1. **Grammar-constrained decoding does not enforce everything in the schema.** With a
    flat schema (`confidence: float` in [0, 1], optional `target_tag`), qwen2.5:1.5b
    returned `confidence: 3` and `HOLD` *with* a setpoint attached — the grammar Ollama
-   builds from the JSON Schema honours types and enums but ignores `minimum`, `maximum`,
-   `maxLength` and cross-field rules. That was a contract failure on **10% of
+   builds from the JSON Schema honours types, enums, integer bounds and string `maxLength`,
+   but not `minimum`/`maximum` on decimal numbers, and no rule between fields can be
+   expressed in it. That was a contract failure on **10% of
    random hours and 16.7% of high-silica hours**.
    The fix was to express the rules in what the grammar *does* enforce: the model output
    is a discriminated union (`HoldOutput | AdjustOutput | AlarmOutput`, keyed on
@@ -440,7 +441,7 @@ What the numbers say:
   held with a consistent reason. An SLM given only a snapshot and generic rules is
   conservative to the point of being uninformative: the gateway makes it safe, not useful.
   Making it useful needs plant-specific context (the soft sensor, recent trends, operator
-  history) or fine-tuning, not a bigger guardrail.
+  history) or fine-tuning, not a bigger guardrail. That is the next section.
 - **Premise checks earn their place**: without them, qwen2.5:1.5b would look like a
   perfect model here (100% valid, sensible-looking HOLDs) while being wrong about *why*
   on every hour. Latency varied between runs on the same hardware (qwen2.5:0.5b p50 was
@@ -463,6 +464,170 @@ reloaded it while the breaker was still open, so the next probe (t = 48.7 s) suc
 the edge path resumed at ~950 ms median, with no manual action. During those 34 failsafe
 answers the PLC received a valid `HOLD` every second — never an error, never a timeout.
 
+### Making it useful: plant context and utility evals
+
+The results above end with "safe, not useful": given one telemetry snapshot, no model ever
+proposed a setpoint change. This section is the follow-up. The question is whether operating
+context (lab trend, a soft sensor, setpoint trends) makes a small model propose the right
+adjustment, and *only* when it should.
+
+**What counts as "right".** The plant data cannot say which setpoint was optimal:
+[flotation-plant-silica-soft-sensor](https://github.com/Rxyxs/flotation-plant-silica-soft-sensor)
+showed that four models trained on different months recommend opposite moves. What the data
+does support is the plant's own practice. In reverse cationic flotation, amine is the
+collector that floats quartz, and this plant's operators raise the amine dose after silica
+rises. The reference is that practice, written as an explicit rule (`src/gateway/policy.py`),
+not an optimum. Each evaluation hour is labelled:
+
+| Label | Rule | Correct answer |
+|---|---|---|
+| `ADJUST` | last two lab results ≥ 4.14% (hourly p90), latest not falling > 0.3 points, soft sensor within one typical error of the threshold, pH and density in range, ≥ 10 m³/h of amine headroom | raise `amina_flow` |
+| `HOLD` | last two lab results and soft sensor ≤ 2.5%, pH and density in range | change nothing |
+| `HOLD_NEAR_MISS` | silica high but the procedure says wait: only the latest result ≥ 4.14%, or both high and the latest falling > 0.3 points | change nothing |
+
+The near-miss class is what makes the test informative. A model that only learned "high
+silica → adjust" scores perfectly on the first two classes and fails the third.
+
+The evaluation uses 40 hours per class (120 total), all after 21 July 2017, out of sample
+for the soft sensor (`data/evals/utility_cases.json`, built by
+`scripts/build_plant_context.py`). The 40 `ADJUST` hours come from 11 different days, so the
+effective sample is smaller than 40 independent events.
+
+**Context design** (`src/gateway/context.py`, `prompts.py`):
+
+- *Arithmetic is done in code, not by the model.* Means, slopes, streaks and headroom are
+  computed and handed over as short facts with the exact number:
+  `[lab_last] latest lab silica in concentrate = 4.89% (sample taken 2 h ago; high means >= 4.14%)`.
+  A lab result is never shown before the plant would have it (2 h lab delay).
+- *Soft sensor.* The Ridge on process variables plus the last known lab results, ported
+  from the flotation repo, retrained in time order on the first 70% of lab hours, and
+  exported as coefficients so the gateway image needs no scikit-learn. Out of sample:
+  **RMSE 0.808 vs 0.918 for persistence** (12% lower). It travels with its error, and it
+  shrinks toward the mean: in the test hours it never estimated ≥ 4.14%, even when the lab
+  showed high silica twice in a row.
+- *Verifiable citations.* The output has an `evidence` field whose items are an enum of the
+  fact ids in *this* request, placed first in the schema so the model cites before it
+  decides. A claim the data contradicts (`SILICA_HIGH` without a cited silica fact that is
+  high) blocks an adjustment.
+- *Unsafe values cannot be written.* `new_value` is an **integer bounded per request** to
+  `[current − max_step, current + max_step]` inside the tag's range, one variant per
+  writable tag. Measured on Ollama 0.12.6, the grammar **enforces integer bounds, string
+  `maxLength`, enums and constants, but not `minimum`/`maximum` on decimal numbers**. That
+  last gap is why `confidence: float` came back as 3 above, and why the setpoint is an
+  integer. The physics check still runs as a second layer (and for cloud engines that may
+  ignore the schema).
+- *Semantic fact ids.* With positional ids (`F1, F2…`) the amine fact was `F4` in the
+  few-shot examples and `F5` in real requests, and qwen2.5:1.5b copied the examples' id list
+  verbatim. Ids are now stable names (`lab_last`, `soft_sensor`, `amina_flow`).
+
+Context reaches the gateway three ways: inside the request (`history`, `lab_results`),
+from `POST /v1/lab` / MQTT `plant/<asset>/lab`, and from the `ContextStore`, which turns the
+telemetry already passing through the gateway into hourly means.
+
+**Ablation.** Six variants, four models, 120 real hours, through the production router
+(`scripts/eval_utility.py`). Raw results with every case are in
+`outputs/reports/utility_eval.json`.
+
+| | Variant | What the model gets |
+|---|---|---|
+| A | snapshot | current telemetry only (the original gateway) |
+| B | context | facts + written operating procedure |
+| C | + few-shot | B + 5 worked examples |
+| D | tools | same facts, fetched by the model via function calling |
+| E | + derived state | B + procedure step 1 computed in code: `silica_state = SUSTAINED_HIGH / SINGLE_HIGH / RECOVERING / NORMAL` |
+| F | procedure gate | E, and the grammar only offers "raise `amina_flow`" when the procedure (in code) allows an adjustment; otherwise only `HOLD` / `RAISE_ALARM` |
+
+![Utility ablation](docs/figures/utility_ablation.png)
+
+| Model | Variant | Correct adjustment | Adjusts on near-miss | Adjusts the wrong way | Alarm on calm hour |
+|---|---|---|---|---|---|
+| `qwen2.5:1.5b-instruct` | A | 0% | 0% | 0% | 95% |
+| `qwen2.5:1.5b-instruct` | B | 100% | 100% | 0% | 0% |
+| `qwen2.5:1.5b-instruct` | C | 27.5% | 47.5% | 0% | 0% |
+| `qwen2.5:1.5b-instruct` | D | 90% | 100% | 10% | 0% |
+| `qwen2.5:1.5b-instruct` | E | 97.5% | 100% | 2.5% | 0% |
+| `qwen2.5:1.5b-instruct` | F | **100%** | **0%** | **0%** | **0%** |
+| `qwen2.5:3b-instruct` | A | 0% | 0% | 0% | 100% |
+| `qwen2.5:3b-instruct` | B | 50% | 100% | 50% | 0% |
+| `qwen2.5:3b-instruct` | C | 80% | 80% | 0% | 0% |
+| `qwen2.5:3b-instruct` | D | 40% | 100% | 60% | 0% |
+| `qwen2.5:3b-instruct` | E | 40% | 0% | 60% | 0% |
+| `qwen2.5:3b-instruct` | F | **100%** | **0%** | **0%** | **0%** |
+| `llama3.2:3b` | A | 0% | 0% | 0% | 100% |
+| `llama3.2:3b` | B | 45% | 85% | 52.5% | 62.5% |
+| `llama3.2:3b` | C | 0% | 0% | 0% | 22.5% |
+| `llama3.2:3b` | D | 70% | 35% | 15% | 100% |
+| `llama3.2:3b` | E | 22.5% | 12.5% | 10% | 52.5% |
+| `llama3.2:3b` | F | 32.5% | 0% | 0% | 100% |
+| `qwen2.5:0.5b-instruct` | A | 0% | 0% | 0% | 100% |
+| `qwen2.5:0.5b-instruct` | B | 0% | 0% | 0% | 100% |
+| `qwen2.5:0.5b-instruct` | C | 0% | 0% | 0% | 95% |
+| `qwen2.5:0.5b-instruct` | D | 7.5% | 82.5% | 90% | 0% |
+| `qwen2.5:0.5b-instruct` | E | 0% | 0% | 0% | 82.5% |
+| `qwen2.5:0.5b-instruct` | F | 0% | 0% | 0% | 82.5% |
+
+Engines were run with a 30 s deadline because the GPU was shared with other workloads for
+part of the run; the decisions do not depend on the deadline, but latency does. The
+recommended configuration was then re-run alone on the GPU with the production 3 s deadline:
+
+| Model | Variant | Correct adjustment | Adjusts on near-miss | Wrong way | Failsafe | p50 / p95 |
+|---|---|---|---|---|---|---|
+| `qwen2.5:1.5b-instruct` | F | 100% | 0% | 0% | 0% | 1.03 / 1.16 s |
+| `qwen2.5:1.5b-instruct` | B | 95% | 100% | 5% | 0% | 1.16 / 1.24 s |
+| `qwen2.5:3b-instruct` | F | 97.5% | 0% | 0% | 0.8% | 1.42 / 1.82 s |
+| `qwen2.5:3b-instruct` | B | 37.5% | 70% | 62.5% | 0% | 1.75 / 2.00 s |
+
+What the ablation shows:
+
+1. **Context is what unlocks adjustments.** With a snapshot (A) no model adjusts, and the
+   3B models raise an alarm on every calm hour. With facts (B), qwen2.5:1.5b proposes the
+   correct move on 100% of the hours that need it.
+2. **But no prompt makes a small model follow the procedure.** In B, D and E, qwen2.5:1.5b
+   adjusts on **100% of near-miss hours**, even in E, where the fact literally says
+   `SINGLE_HIGH: only the latest lab result is >= 4.14%: not sustained yet, wait for the next one`.
+   Few-shot examples (C) made it *worse* for the 1.5B model (27.5% correct, 47.5% near-miss).
+   qwen2.5:3b, given freedom, lowered the amine in 50–60% of its adjustments in B, D and E.
+   Tool calling (D) changed nothing material and multiplied the latency by 1.7 to 2.7.
+3. **The rule belongs in code, enforced through the grammar.** In F the procedure decides in
+   code *whether* an adjustment exists and in *which direction*, and the grammar offers only
+   that. qwen2.5:1.5b and qwen2.5:3b then reach 100% correct adjustments with 0% near-miss
+   adjustments, 0% wrong-way moves and 0% calm-hour alarms. The 0% on near-miss in F holds
+   *by construction*, not because the model learned anything; what F measures is whether
+   the model still takes the adjustment when it is offered, and picks a sensible value
+   within the bound.
+4. **Not every model is rescued.** qwen2.5:0.5b raises alarms on most calm hours in five
+   of the six variants, and llama3.2:3b raises an alarm on every calm hour in F. The gateway keeps them
+   safe, and the utility evals are what tell you not to deploy them.
+5. **The rationale is not evidence.** Even with correct structured fields, the free text
+   contained arithmetic that was false ("4.64 < 4.14", "4.14% >= 5.01%"). Structured
+   fields are verified; the prose is shown to operators and never trusted.
+
+Where that leaves the SLM: on this task the decision is a rule, and a rule is better
+executed by code. The model earns its place where the rules run out: reading an operator
+note, choosing a value inside the allowed bound, explaining the decision. It does that
+inside a space the procedure has already made safe. A plant that wants the model to decide
+more needs either a model that passes these evals or the step-test data that would justify
+a richer rule, not a longer prompt.
+
+Run-to-run variation: the 30 s and 3 s runs of the same configuration differed by a few
+points (qwen2.5:1.5b B: 100% vs 95% correct) at temperature 0, so differences of one or two
+hours between variants are not meaningful.
+
+#### Utility tests in pytest
+
+`tests/evals/test_utility.py` runs the recommended configuration against a real Ollama and
+fails if the model stops proposing the adjustment (< 80% of `ADJUST` hours), adjusts a calm
+or near-miss hour (> 5%), moves amine the wrong way (> 5%), or misses the deadline. It skips
+when no Ollama is reachable, so it never blocks the main suite.
+
+```bash
+OLLAMA_URL=http://127.0.0.1:11434 UTILITY_MODEL=qwen2.5:1.5b-instruct pytest tests/evals -v -s
+```
+
+The `Utility evals` workflow runs it weekly and on demand on a GitHub runner, with Ollama
+on CPU. Validated locally on 4 CPU cores and no GPU: 30 cases (10 per class) in 7.5 minutes,
+5/5 tests passing (100% correct adjustments, 0% near-miss, 0% wrong way).
+
 ### Endpoints
 
 | Method | Path | Purpose |
@@ -472,6 +637,8 @@ answers the PLC received a valid `HOLD` every second — never an error, never a
 | `GET` | `/v1/jobs/{job_id}` | `queued` / `running` / `done` (with result) / `failed`. |
 | `GET` | `/v1/backends` | Circuit-breaker state per engine and warm-up status. |
 | `GET` | `/v1/audit?limit=50` | Latest decisions plus `chain_ok` (hash-chain verification). |
+| `POST` | `/v1/lab` | Lab result of silica in concentrate (`asset_id`, `sampled_at`, `silica_pct`, `delay_h`) → the asset's context. |
+| `GET` | `/v1/context/{asset_id}` | The facts the model would see right now for that asset. |
 | `GET` | `/v1/schema` | JSON Schemas: `scada_action` (what the PLC parses) and `model_output` (what the engine is constrained to). |
 | `GET` | `/health` | Liveness; does not touch the engines. |
 | `GET` | `/metrics` | Prometheus: `slmgw_inference_total{tier,action,degraded}`, `slmgw_inference_latency_seconds`, `slmgw_rate_limited_total`. |
@@ -553,6 +720,9 @@ Checklist before connecting to a real plant:
 | `MQTT_HOST` / `MQTT_PORT` / `MQTT_USERNAME` / `MQTT_PASSWORD` | unset / `1883` | Enables the MQTT bridge. |
 | `TLS_CERT_FILE` / `TLS_KEY_FILE` / `TLS_CA_FILE` | unset | Enables mTLS when all three are set. |
 | `AUDIT_DB_PATH` | `data/audit/gateway_audit.duckdb` | DuckDB audit file. |
+| `PROMPT_MODE` | `context_gated` | `snapshot`, `context`, `context_fewshot`, `context_derived` or `context_gated` (see the ablation). |
+| `CONTEXT_WINDOW_H` | `8` | Hours of history turned into trend facts. |
+| `SOFT_SENSOR_PATH` | bundled JSON | Soft-sensor coefficients (`scripts/build_plant_context.py`). |
 
 ### Integration tests
 
@@ -561,7 +731,7 @@ python -m venv venv && venv/Scripts/pip install -r requirements-gateway-dev.txt 
 pytest tests/gateway -v
 ```
 
-81 tests, no GPU or network required:
+106 tests, no GPU or network required:
 
 | File | What it exercises |
 |---|---|
@@ -570,6 +740,7 @@ pytest tests/gateway -v
 | `test_router.py` | Edge→cloud fallback, breaker skipping a dead engine, deadline cut, failsafe, no backend-shopping after a physics rejection, injection handling, cache, single-flight, re-warm, concurrency + intact audit chain. |
 | `test_security_audit.py` | Injection rules (English/Spanish, hidden zero-width), benign operator notes, API keys, token bucket, audit hash chain across restarts and tamper detection. |
 | `test_api.py` | REST contract: 401/422/429, writeback gating, unsafe setpoint never written, jobs, audit, metrics. |
+| `test_context.py` | Facts and lab-delay visibility, soft-sensor artifact vs persistence, reference rule, citation checks, bounded per-request schema, few-shot format, `ContextStore`, procedure gate, and that every stored eval case still reproduces its label. |
 | `test_protocols.py` | Real OPC UA server (asyncua) and Modbus TCP slave (pymodbus) on local sockets: read, write, register scaling, closed loop Modbus → router → Modbus; MQTT bridge routing; Redis cache and job queue (fakeredis). |
 
 The CI job `plant-gateway` runs this suite and builds the edge image.

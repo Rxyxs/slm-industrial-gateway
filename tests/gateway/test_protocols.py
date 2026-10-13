@@ -162,3 +162,18 @@ async def test_redis_cache_and_job_queue(settings, audit, plant_request):
         assert sum(s.result.cached for s in states) == 4
     finally:
         await q.stop()
+
+
+async def test_mqtt_lab_topic_feeds_context_store(settings, audit):
+    from src.gateway.context import ContextStore
+
+    store = ContextStore()
+    router = InferenceRouter(settings, [FakeBackend("edge", default=action_json())], audit,
+                             context_store=store)
+    bridge = MqttBridge(router, FieldWriter(None, False), "unused")
+    client = FakeMqttClient()
+    await bridge.handle(client, "plant/flot-col-01/lab",
+                        b'{"sampled_at": "2017-08-01T05:00:00", "silica_pct": 4.6}')
+    await bridge.handle(client, "plant/flot-col-01/lab", b'{"silica_pct": "high"}')
+    assert [l.silica_pct for l in store.labs("flot-col-01")] == [4.6]
+    assert [t for t, _, _ in client.published] == ["plant/flot-col-01/rejected"]

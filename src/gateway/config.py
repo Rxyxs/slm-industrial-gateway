@@ -66,6 +66,17 @@ class GatewaySettings:
     # publica para que un operador la confirme (modo asesor, el default seguro).
     allow_plc_writeback: bool = False
 
+    # "snapshot": solo la telemetría actual (comportamiento original).
+    # "context": hechos de tendencia/laboratorio/soft sensor + procedimiento.
+    # "context_fewshot": lo anterior más ejemplos resueltos.
+    # "context_derived": "context" más el estado de la sílice ya calculado (silica_state).
+    # "context_gated": "context_derived" y además la gramática solo ofrece ADJUST cuando el
+    #   procedimiento, calculado en código, lo permite (silica_state == SUSTAINED_HIGH).
+    #   Default: es la única variante que en la evaluación cumplió las tres metas a la vez.
+    prompt_mode: str = "context_gated"
+    context_window_h: int = 8
+    soft_sensor_path: str = ""
+
 
 def load_settings() -> GatewaySettings:
     backends: list[BackendSettings] = []
@@ -121,4 +132,7 @@ def load_settings() -> GatewaySettings:
         audit_db_path=os.environ.get("AUDIT_DB_PATH", "data/audit/gateway_audit.duckdb"),
         api_keys=_env_list("GATEWAY_API_KEYS"),
         allow_plc_writeback=_env_bool("ALLOW_PLC_WRITEBACK", False),
+        prompt_mode=os.environ.get("PROMPT_MODE", "context_gated"),
+        context_window_h=int(os.environ.get("CONTEXT_WINDOW_H", "8")),
+        soft_sensor_path=os.environ.get("SOFT_SENSOR_PATH", ""),
     )

@@ -36,7 +36,7 @@ from src.gateway.breaker import CircuitBreaker  # noqa: E402
 from src.gateway.config import BackendSettings, GatewaySettings  # noqa: E402
 from src.gateway.router import InferenceRouter  # noqa: E402
 from src.gateway.schemas import InferenceRequest  # noqa: E402
-from src.gateway.security import SYSTEM_PROMPT, build_user_prompt  # noqa: E402
+from src.gateway.prompts import SNAPSHOT_SYSTEM, snapshot_user_prompt  # noqa: E402
 from src.gateway.schemas import model_output_json_schema  # noqa: E402
 from src.gateway.tags import TAG_REGISTRY  # noqa: E402
 from src.gateway.validation import OutputRejected, check_physics, check_premise, parse_action  # noqa: E402
@@ -64,7 +64,7 @@ def to_request(ts, row) -> InferenceRequest:
 async def classify_raw(backend: OllamaBackend, req: InferenceRequest) -> str:
     """Llamada directa (sin router) para clasificar POR QUÉ falla una salida."""
     try:
-        raw = await backend.generate(SYSTEM_PROMPT, build_user_prompt(req, ""),
+        raw = await backend.generate(SNAPSHOT_SYSTEM, snapshot_user_prompt(req.asset_id, req.telemetry, ""),
                                      model_output_json_schema(), timeout_s=30)
     except BackendError as exc:
         return "engine: " + ("timeout >30s" if "timeout" in str(exc) else "error")
@@ -87,8 +87,10 @@ async def bench_model(model: str, url: str, requests: list[InferenceRequest], de
                          timeout_s=deadline)
     backend = OllamaBackend(bs)
     await backend.warmup()
+    # Este benchmark mide el modo foto (solo telemetría actual); el modo contexto se mide
+    # en scripts/eval_utility.py.
     settings = GatewaySettings(deadline_s=deadline, breaker_failure_threshold=10_000,
-                               audit_db_path=":memory:")
+                               audit_db_path=":memory:", prompt_mode="snapshot")
     audit = AuditLog(":memory:")
     router = InferenceRouter(settings, [backend], audit, cache=None)
 

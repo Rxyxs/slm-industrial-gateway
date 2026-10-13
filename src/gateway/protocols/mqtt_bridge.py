@@ -1,6 +1,7 @@
 """Puente MQTT bidireccional.
 
 Suscribe:  plant/<asset_id>/telemetry        (payload = InferenceRequest JSON)
+           plant/<asset_id>/lab              (payload = {"sampled_at", "silica_pct"}; va al ContextStore)
 Publica:   plant/<asset_id>/recommendation   (payload = InferenceResponse JSON, QoS 1)
            plant/<asset_id>/rejected          (payload malformado o no autorizado)
 
@@ -20,16 +21,18 @@ from pydantic import ValidationError
 
 from src.gateway.protocols.field import FieldWriter
 from src.gateway.router import InferenceRouter
-from src.gateway.schemas import InferenceRequest
+from src.gateway.context import LabResult
+from src.gateway.schemas import InferenceRequest, LabIn
 
 log = logging.getLogger("slm_gateway.mqtt")
 
 TELEMETRY_TOPIC = "plant/+/telemetry"
+LAB_TOPIC = "plant/+/lab"
 
 
-def asset_from_topic(topic: str) -> str | None:
+def asset_from_topic(topic: str, kind: str = "telemetry") -> str | None:
     parts = topic.split("/")
-    if len(parts) == 3 and parts[0] == "plant" and parts[2] == "telemetry":
+    if len(parts) == 3 and parts[0] == "plant" and parts[2] == kind:
         return parts[1]
     return None
 
@@ -47,6 +50,10 @@ class MqttBridge:
         self.processed = 0
 
     async def handle(self, client, topic: str, payload: bytes) -> None:
+        lab_asset = asset_from_topic(topic, "lab")
+        if lab_asset is not None:
+            await self.handle_lab(client, lab_asset, payload)
+            return
         asset = asset_from_topic(topic)
         if asset is None:
             return
@@ -65,6 +72,16 @@ class MqttBridge:
         await client.publish(f"plant/{asset}/recommendation", json.dumps(out), qos=1)
         self.processed += 1
 
+    async def handle_lab(self, client, asset: str, payload: bytes) -> None:
+        store = self.router.context_store
+        try:
+            lab = LabIn.model_validate_json(payload)
+        except ValidationError as exc:
+            await client.publish(f"plant/{asset}/rejected", json.dumps({"error": str(exc)[:300]}), qos=1)
+            return
+        if store is not None:
+            store.add_lab(asset, LabResult(lab.sampled_at, lab.silica_pct, lab.delay_h))
+
     async def run(self, stop: asyncio.Event | None = None) -> None:
         import aiomqtt
 
@@ -77,6 +94,7 @@ class MqttBridge:
                     tls_context=self.tls_context, identifier="slm-gateway",
                 ) as client:
                     await client.subscribe(TELEMETRY_TOPIC, qos=1)
+                    await client.subscribe(LAB_TOPIC, qos=1)
                     log.info("mqtt connected to %s:%s", self.host, self.port)
                     backoff = 1.0
                     tasks: set[asyncio.Task] = set()

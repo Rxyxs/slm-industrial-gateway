@@ -32,16 +32,39 @@ from src.gateway.backends import BackendError, InferenceBackend
 from src.gateway.breaker import CircuitBreaker, CircuitOpenError
 from src.gateway.config import GatewaySettings
 from src.gateway.resilience import cache_key
-from src.gateway.schemas import InferenceRequest, InferenceResponse, model_output_json_schema
-from src.gateway.security import SYSTEM_PROMPT, build_user_prompt, inspect_note
+from dataclasses import dataclass
+from datetime import datetime, timezone
+from pathlib import Path
+
+from src.gateway.context import (
+    ContextStore, HourRecord, LabResult, PlantContext, build_context, procedure_bounds,
+)
+from src.gateway.prompts import (
+    CONTEXT_SYSTEM, SNAPSHOT_SYSTEM, context_user_prompt, few_shot_examples, snapshot_user_prompt,
+)
+from src.gateway.schemas import (
+    InferenceRequest, InferenceResponse, model_output_json_schema, setpoint_bounds,
+)
+from src.gateway.security import inspect_note
+from src.gateway.soft_sensor import DEFAULT_PATH as SOFT_SENSOR_DEFAULT, SoftSensor
 from src.gateway.tags import TAG_REGISTRY
 from src.gateway.validation import (
-    OutputRejected, check_physics, check_premise, failsafe_hold, parse_action,
+    OutputRejected, check_citations, check_physics, check_premise, failsafe_hold, parse_action,
 )
 
 log = logging.getLogger("slm_gateway.router")
 
-_SCHEMA = model_output_json_schema()
+_FEW_SHOT = tuple(few_shot_examples())
+MIN_CONTEXT_HOURS = 3
+
+
+@dataclass
+class PromptBundle:
+    system: str
+    user: str
+    schema: dict
+    examples: tuple
+    ctx: PlantContext | None
 
 
 def complexity_score(req: InferenceRequest) -> float:
@@ -74,8 +97,15 @@ class InferenceRouter:
         audit: AuditLog,
         cache=None,
         clock=time.monotonic,
+        context_store: ContextStore | None = None,
+        soft_sensor: SoftSensor | None = None,
     ):
         self.settings = settings
+        self.context_store = context_store
+        if soft_sensor is None:
+            path = Path(settings.soft_sensor_path or SOFT_SENSOR_DEFAULT)
+            soft_sensor = SoftSensor.load(path) if path.exists() else None
+        self.soft_sensor = soft_sensor
         self.backends = backends
         self.audit = audit
         self.cache = cache
@@ -113,10 +143,17 @@ class InferenceRouter:
             )
             req = req.model_copy(update={"operator_note": ""})
 
-        if self.cache is None:
-            return await self._run_backends(req, request_id, client_id, note_block, t0, deadline, None)
+        if self.context_store is not None:
+            ts = next((s.ts for s in req.telemetry if s.ts is not None), None)
+            self.context_store.observe(req.asset_id, ts or datetime.now(timezone.utc).replace(tzinfo=None),
+                                       {s.tag: s.value for s in req.telemetry if s.quality == "good"})
 
-        key = cache_key(req)
+        bundle = self.build_prompt(req)
+        if self.cache is None:
+            return await self._run_backends(req, request_id, client_id, note_block, t0, deadline, None,
+                                            bundle)
+
+        key = cache_key(req, bundle.ctx.render() if bundle.ctx else "")
         hit = await self.cache.get(key)
         if hit is not None:
             return await self._serve_cached(InferenceResponse.model_validate_json(hit), req,
@@ -135,12 +172,14 @@ class InferenceRouter:
             if shared is not None and shared.tier not in {"failsafe"}:
                 return await self._serve_cached(shared, req, request_id, client_id, note_block,
                                                 elapsed_ms())
-            return await self._run_backends(req, request_id, client_id, note_block, t0, deadline, key)
+            return await self._run_backends(req, request_id, client_id, note_block, t0, deadline, key,
+                                            bundle)
 
         fut: asyncio.Future = asyncio.get_running_loop().create_future()
         self._inflight[key] = fut
         try:
-            resp = await self._run_backends(req, request_id, client_id, note_block, t0, deadline, key)
+            resp = await self._run_backends(req, request_id, client_id, note_block, t0, deadline, key,
+                                            bundle)
             fut.set_result(resp)
             return resp
         except BaseException:
@@ -168,10 +207,9 @@ class InferenceRouter:
 
     async def _run_backends(self, req: InferenceRequest, request_id: str, client_id: str,
                             note_block: str | None, t0: float, deadline: float,
-                            key: str | None) -> InferenceResponse:
+                            key: str | None, bundle: PromptBundle) -> InferenceResponse:
         elapsed_ms = lambda: round((time.perf_counter() - t0) * 1000, 2)  # noqa: E731
         score = complexity_score(req)
-        user_prompt = build_user_prompt(req, req.operator_note)
         attempts: list[str] = []
         last_error: str | None = None
 
@@ -185,7 +223,7 @@ class InferenceRouter:
             try:
                 raw = await breaker.call(
                     lambda b=backend, t=timeout: asyncio.wait_for(
-                        self._generate_checked(b, user_prompt, t), timeout=t
+                        self._generate_checked(b, bundle, t), timeout=t
                     )
                 )
             except CircuitOpenError:
@@ -203,12 +241,16 @@ class InferenceRouter:
             action, _ = raw
             reason = note_block
             premise = check_premise(action, req.telemetry)
+            cite_reject, cite_warn = check_citations(action, bundle.ctx)
+            warnings = [w for w in (premise, cite_warn) if w]
             try:
                 check_physics(action, req.telemetry)
                 if premise and action.action == "ADJUST_SETPOINT":
                     # Mover un setpoint por un motivo que los datos desmienten no
                     # se ejecuta, aunque el valor sea físicamente válido.
                     raise OutputRejected(premise)
+                if cite_reject:
+                    raise OutputRejected(cite_reject)
             except OutputRejected as exc:
                 attempts.append(f"{backend.name}:physics_rejected")
                 action = failsafe_hold(str(exc))
@@ -226,7 +268,7 @@ class InferenceRouter:
                 request_id=request_id, asset_id=req.asset_id, action=action,
                 backend=backend.name, tier=backend.tier, latency_ms=elapsed_ms(),
                 degraded=len(attempts) > 1, rejected_reason=reason, attempts=attempts,
-                warnings=[premise] if premise else [],
+                warnings=warnings,
             )
             if self.cache is not None and key is not None and resp.rejected_reason is None:
                 await self.cache.set(key, resp.model_dump_json())
@@ -243,11 +285,51 @@ class InferenceRouter:
         await self._audit_response(resp, client_id, "inference_failsafe", score)
         return resp
 
-    async def _generate_checked(self, backend: InferenceBackend, user_prompt: str, timeout: float):
+    async def _generate_checked(self, backend: InferenceBackend, bundle: PromptBundle, timeout: float):
         # El parseo va dentro de la llamada protegida por el breaker: un backend
         # que responde basura con HTTP 200 está tan caído como uno que no responde.
-        raw = await backend.generate(SYSTEM_PROMPT, user_prompt, _SCHEMA, timeout)
+        if bundle.examples:
+            raw = await backend.generate(bundle.system, bundle.user, bundle.schema, timeout,
+                                         examples=bundle.examples)
+        else:
+            raw = await backend.generate(bundle.system, bundle.user, bundle.schema, timeout)
         return parse_action(raw), raw
+
+    def context_for(self, req: InferenceRequest) -> PlantContext | None:
+        """Hechos para esta solicitud: los que trae el cliente o los del ContextStore."""
+        if self.settings.prompt_mode == "snapshot":
+            return None
+        if req.history:
+            window = [HourRecord(h.ts, h.values) for h in req.history][-self.settings.context_window_h:]
+        elif self.context_store is not None:
+            window = self.context_store.window(req.asset_id)
+        else:
+            window = []
+        if len(window) < MIN_CONTEXT_HOURS:
+            return None
+        if req.lab_results is not None:
+            labs = [LabResult(l.sampled_at, l.silica_pct, l.delay_h) for l in req.lab_results]
+        elif self.context_store is not None:
+            labs = self.context_store.labs(req.asset_id)
+        else:
+            labs = []
+        return build_context(window, labs, self.soft_sensor,
+                             derived=self.settings.prompt_mode in {"context_derived", "context_gated"})
+
+    def build_prompt(self, req: InferenceRequest) -> PromptBundle:
+        ctx = self.context_for(req)
+        bounds = setpoint_bounds(req.telemetry)
+        if ctx is None or not ctx.facts:
+            return PromptBundle(SNAPSHOT_SYSTEM, snapshot_user_prompt(req.asset_id, req.telemetry,
+                                                                      req.operator_note),
+                                model_output_json_schema(None, bounds), (), None)
+        examples = _FEW_SHOT if self.settings.prompt_mode == "context_fewshot" else ()
+        if self.settings.prompt_mode == "context_gated":
+            # El procedimiento decide, en código, qué ajustes existen en esta hora: ninguno
+            # (solo HOLD/RAISE_ALARM), o solo subir amina dentro de su paso máximo.
+            bounds = procedure_bounds(ctx, bounds)
+        return PromptBundle(CONTEXT_SYSTEM, context_user_prompt(req.asset_id, ctx, req.operator_note),
+                            model_output_json_schema(ctx.ids, bounds), examples, ctx)
 
     async def _audit_response(self, resp: InferenceResponse, client_id: str, event: str,
                               score: float | None = None) -> None:

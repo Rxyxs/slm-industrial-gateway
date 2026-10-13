@@ -356,8 +356,8 @@ modelo restringido igual falla, y cada una definió una capa del gateway:
 1. **La decodificación guiada por gramática no hace cumplir todo el schema.** Con un schema
    plano (`confidence: float` en [0, 1], `target_tag` opcional), qwen2.5:1.5b devolvió
    `confidence: 3` y `HOLD` *con* un setpoint adjunto: la gramática que Ollama arma desde el
-   JSON Schema respeta tipos y enums, pero ignora `minimum`, `maximum`, `maxLength` y las
-   reglas entre campos. Eso fue falla de contrato en **10% de las horas al azar y
+   JSON Schema respeta tipos, enums, límites de enteros y `maxLength` de strings, pero no
+   `minimum`/`maximum` en números decimales, y no permite expresar reglas entre campos. Eso fue falla de contrato en **10% de las horas al azar y
    16,7% de las horas de sílice alta**.
    La corrección fue expresar las reglas con lo que la gramática *sí* hace cumplir: la salida
    del modelo es una unión discriminada (`HoldOutput | AdjustOutput | AlarmOutput`, por
@@ -466,7 +466,7 @@ Lo que dicen los números:
   consistente. Un SLM con solo una foto de telemetría y reglas genéricas es conservador
   hasta no aportar información: el gateway lo vuelve seguro, no útil. Para que sea útil
   hace falta contexto propio de la planta (el soft sensor, tendencias recientes, historial
-  de operadores) o fine-tuning, no un guardrail más grande.
+  de operadores) o fine-tuning, no un guardrail más grande. Eso es la sección siguiente.
 - **La verificación de premisas se gana su lugar**: sin ella, qwen2.5:1.5b se vería como un
   modelo perfecto (100% válido, HOLDs razonables) estando equivocado en el *por qué* en
   todas las horas. La latencia varió entre corridas en el mismo hardware (p50 de
@@ -490,6 +490,178 @@ el breaker aún abierto, así que la sonda siguiente (t = 48,7 s) funcionó y el
 ~950 ms de mediana, sin intervención manual. Durante esas 34 respuestas failsafe el PLC
 recibió un `HOLD` válido cada segundo: nunca un error, nunca un timeout.
 
+### Hacerlo útil: contexto de planta y evaluaciones de utilidad
+
+Los resultados de arriba terminan en "seguro, no útil": con una sola foto de telemetría,
+ningún modelo propuso nunca cambiar un setpoint. Esta sección es la continuación: ¿el
+contexto operativo (tendencia de laboratorio, un soft sensor, tendencias de setpoints)
+hace que un modelo pequeño proponga el ajuste correcto, y *solo* cuando corresponde?
+
+**Qué cuenta como "correcto".** Los datos de la planta no pueden decir qué setpoint era el
+óptimo:
+[flotation-plant-silica-soft-sensor](https://github.com/Rxyxs/flotation-plant-silica-soft-sensor)
+mostró que cuatro modelos entrenados en meses distintos recomiendan movimientos opuestos.
+Lo que sí respaldan los datos es la práctica de la propia planta. En flotación catiónica
+inversa la amina es el colector que flota el cuarzo, y los operadores de esta planta suben
+la dosis de amina después de que sube la sílice. La referencia es esa práctica escrita como
+regla explícita (`src/gateway/policy.py`), no un óptimo. Cada hora de evaluación se etiqueta:
+
+| Etiqueta | Regla | Respuesta correcta |
+|---|---|---|
+| `ADJUST` | dos últimos resultados de laboratorio ≥ 4,14% (p90 horario), el último no baja más de 0,3 puntos, soft sensor a menos de un error típico del umbral, pH y densidad en rango, ≥ 10 m³/h de holgura de amina | subir `amina_flow` |
+| `HOLD` | dos últimos resultados y soft sensor ≤ 2,5%, pH y densidad en rango | no cambiar nada |
+| `HOLD_NEAR_MISS` | sílice alta pero el procedimiento dice esperar: solo el último resultado ≥ 4,14%, o los dos altos y el último bajando más de 0,3 puntos | no cambiar nada |
+
+La clase near-miss es la que hace informativa la prueba. Un modelo que solo aprendió
+"sílice alta → ajustar" saca puntaje perfecto en las dos primeras y falla la tercera.
+
+La evaluación usa 40 horas por clase (120 en total), todas posteriores al 21 de julio de
+2017, fuera de muestra para el soft sensor (`data/evals/utility_cases.json`, generado por
+`scripts/build_plant_context.py`). Las 40 horas `ADJUST` vienen de 11 días distintos, así
+que la muestra efectiva es menor que 40 eventos independientes.
+
+**Diseño del contexto** (`src/gateway/context.py`, `prompts.py`):
+
+- *La aritmética la hace el código, no el modelo.* Promedios, pendientes, rachas y holguras
+  se calculan y se entregan como hechos cortos con el número exacto:
+  `[lab_last] latest lab silica in concentrate = 4.89% (sample taken 2 h ago; high means >= 4.14%)`.
+  Nunca se muestra un resultado de laboratorio antes de que la planta lo tendría (2 h de
+  retraso del laboratorio).
+- *Soft sensor.* El Ridge sobre variables de proceso más los últimos resultados de
+  laboratorio conocidos, portado del repo de flotación, re-entrenado en orden temporal con
+  el 70% inicial de las horas de laboratorio y exportado como coeficientes, así la imagen
+  del gateway no necesita scikit-learn. Fuera de muestra: **RMSE 0,808 contra 0,918 de la
+  persistencia** (12% menos). Viaja con su error, y se encoge hacia la media: en las horas
+  de prueba nunca estimó ≥ 4,14%, aunque el laboratorio mostrara sílice alta dos veces
+  seguidas.
+- *Citas verificables.* La salida tiene un campo `evidence` cuyos elementos son un enum de
+  los ids de los hechos de *esta* solicitud, puesto primero en el schema para que el modelo
+  cite antes de decidir. Una afirmación que los datos contradicen (`SILICA_HIGH` sin citar
+  un hecho de sílice que esté alto) bloquea un ajuste.
+- *Los valores inseguros no se pueden escribir.* `new_value` es un **entero acotado por
+  solicitud** a `[actual − max_step, actual + max_step]` dentro del rango del tag, con una
+  variante por tag escribible. Medido en Ollama 0.12.6, la gramática **respeta los límites
+  de enteros, el `maxLength` de strings, los enums y las constantes, pero no
+  `minimum`/`maximum` en números decimales**. Ese último hueco explica el `confidence: 3` de
+  más arriba, y es la razón de que el setpoint sea entero. La verificación física sigue
+  corriendo como segunda capa (y para motores en la nube que pueden ignorar el schema).
+- *Ids semánticos.* Con ids posicionales (`F1, F2…`) el hecho de la amina era `F4` en los
+  ejemplos few-shot y `F5` en las solicitudes reales, y qwen2.5:1.5b copiaba tal cual la
+  lista de ids de los ejemplos. Ahora los ids son nombres estables (`lab_last`,
+  `soft_sensor`, `amina_flow`).
+
+El contexto llega al gateway por tres vías: dentro de la solicitud (`history`,
+`lab_results`), por `POST /v1/lab` / MQTT `plant/<asset>/lab`, y desde el `ContextStore`,
+que convierte en promedios horarios la telemetría que ya pasa por el gateway.
+
+**Ablación.** Seis variantes, cuatro modelos, 120 horas reales, a través del router de
+producción (`scripts/eval_utility.py`). Los resultados crudos, con cada caso, están en
+`outputs/reports/utility_eval.json`.
+
+| | Variante | Qué recibe el modelo |
+|---|---|---|
+| A | foto | solo la telemetría actual (el gateway original) |
+| B | contexto | hechos + procedimiento operativo escrito |
+| C | + few-shot | B + 5 ejemplos resueltos |
+| D | herramientas | los mismos hechos, pedidos por el modelo con function calling |
+| E | + estado derivado | B + el paso 1 del procedimiento calculado en código: `silica_state = SUSTAINED_HIGH / SINGLE_HIGH / RECOVERING / NORMAL` |
+| F | compuerta del procedimiento | E, y la gramática solo ofrece "subir `amina_flow`" cuando el procedimiento (en código) permite un ajuste; si no, solo `HOLD` / `RAISE_ALARM` |
+
+![Ablación de utilidad](docs/figures/utility_ablation.png)
+
+| Modelo | Variante | Ajuste correcto | Ajusta en near-miss | Ajusta al revés | Alarma en hora tranquila |
+|---|---|---|---|---|---|
+| `qwen2.5:1.5b-instruct` | A | 0% | 0% | 0% | 95% |
+| `qwen2.5:1.5b-instruct` | B | 100% | 100% | 0% | 0% |
+| `qwen2.5:1.5b-instruct` | C | 27,5% | 47,5% | 0% | 0% |
+| `qwen2.5:1.5b-instruct` | D | 90% | 100% | 10% | 0% |
+| `qwen2.5:1.5b-instruct` | E | 97,5% | 100% | 2,5% | 0% |
+| `qwen2.5:1.5b-instruct` | F | **100%** | **0%** | **0%** | **0%** |
+| `qwen2.5:3b-instruct` | A | 0% | 0% | 0% | 100% |
+| `qwen2.5:3b-instruct` | B | 50% | 100% | 50% | 0% |
+| `qwen2.5:3b-instruct` | C | 80% | 80% | 0% | 0% |
+| `qwen2.5:3b-instruct` | D | 40% | 100% | 60% | 0% |
+| `qwen2.5:3b-instruct` | E | 40% | 0% | 60% | 0% |
+| `qwen2.5:3b-instruct` | F | **100%** | **0%** | **0%** | **0%** |
+| `llama3.2:3b` | A | 0% | 0% | 0% | 100% |
+| `llama3.2:3b` | B | 45% | 85% | 52,5% | 62,5% |
+| `llama3.2:3b` | C | 0% | 0% | 0% | 22,5% |
+| `llama3.2:3b` | D | 70% | 35% | 15% | 100% |
+| `llama3.2:3b` | E | 22,5% | 12,5% | 10% | 52,5% |
+| `llama3.2:3b` | F | 32,5% | 0% | 0% | 100% |
+| `qwen2.5:0.5b-instruct` | A | 0% | 0% | 0% | 100% |
+| `qwen2.5:0.5b-instruct` | B | 0% | 0% | 0% | 100% |
+| `qwen2.5:0.5b-instruct` | C | 0% | 0% | 0% | 95% |
+| `qwen2.5:0.5b-instruct` | D | 7,5% | 82,5% | 90% | 0% |
+| `qwen2.5:0.5b-instruct` | E | 0% | 0% | 0% | 82,5% |
+| `qwen2.5:0.5b-instruct` | F | 0% | 0% | 0% | 82,5% |
+
+Los motores corrieron con un deadline de 30 s porque el GPU estuvo compartido con otras
+cargas durante parte de la corrida; las decisiones no dependen del deadline, pero la
+latencia sí. La configuración recomendada se volvió a correr sola en el GPU con el deadline
+de producción de 3 s:
+
+| Modelo | Variante | Ajuste correcto | Ajusta en near-miss | Al revés | Failsafe | p50 / p95 |
+|---|---|---|---|---|---|---|
+| `qwen2.5:1.5b-instruct` | F | 100% | 0% | 0% | 0% | 1,03 / 1,16 s |
+| `qwen2.5:1.5b-instruct` | B | 95% | 100% | 5% | 0% | 1,16 / 1,24 s |
+| `qwen2.5:3b-instruct` | F | 97,5% | 0% | 0% | 0,8% | 1,42 / 1,82 s |
+| `qwen2.5:3b-instruct` | B | 37,5% | 70% | 62,5% | 0% | 1,75 / 2,00 s |
+
+Lo que muestra la ablación:
+
+1. **El contexto es lo que destraba los ajustes.** Con una foto (A) ningún modelo ajusta, y
+   los de 3B levantan alarma en todas las horas tranquilas. Con hechos (B), qwen2.5:1.5b
+   propone el movimiento correcto en el 100% de las horas que lo necesitan.
+2. **Pero ningún prompt hace que un modelo pequeño siga el procedimiento.** En B, D y E,
+   qwen2.5:1.5b ajusta en el **100% de las horas near-miss**, incluso en E, donde el hecho
+   dice literalmente
+   `SINGLE_HIGH: only the latest lab result is >= 4.14%: not sustained yet, wait for the next one`.
+   Los ejemplos few-shot (C) lo *empeoraron* para el modelo de 1,5B (27,5% correcto, 47,5%
+   near-miss). qwen2.5:3b, con libertad, bajó la amina en el 50-60% de sus ajustes en B, D y
+   E. El function calling (D) no cambió nada sustancial y multiplicó la latencia por 1,7 a
+   2,7.
+3. **La regla va en código, impuesta por la gramática.** En F el procedimiento decide en
+   código *si* existe un ajuste y en *qué dirección*, y la gramática ofrece solo eso.
+   qwen2.5:1.5b y qwen2.5:3b llegan entonces a 100% de ajustes correctos con 0% de ajustes
+   en near-miss, 0% de movimientos al revés y 0% de alarmas en horas tranquilas. El 0% en
+   near-miss de F se cumple *por construcción*, no porque el modelo haya aprendido algo; lo
+   que F mide es si el modelo igual toma el ajuste cuando se le ofrece y elige un valor
+   razonable dentro del límite.
+4. **No todos los modelos se rescatan.** qwen2.5:0.5b levanta alarma en la mayoría de las
+   horas tranquilas en cinco de las seis variantes, y llama3.2:3b levanta alarma en todas las horas tranquilas en F. El
+   gateway los mantiene seguros, y las evaluaciones de utilidad son las que dicen que no hay
+   que desplegarlos.
+5. **La explicación no es evidencia.** Aun con los campos estructurados correctos, el texto
+   libre traía aritmética falsa ("4.64 < 4.14", "4.14% >= 5.01%"). Los campos estructurados
+   se verifican; la prosa se le muestra al operador y nunca se le cree.
+
+Dónde queda el SLM: en esta tarea la decisión es una regla, y una regla la ejecuta mejor el
+código. El modelo se gana su lugar donde las reglas se acaban: leer una nota del operador,
+elegir un valor dentro del límite permitido, explicar la decisión. Lo hace dentro de un
+espacio que el procedimiento ya volvió seguro. Una planta que quiera que el modelo decida
+más necesita o un modelo que pase estas evaluaciones, o los datos de step-tests que
+justifiquen una regla más rica; no un prompt más largo.
+
+Variación entre corridas: las corridas de 30 s y de 3 s de la misma configuración difirieron
+en algunos puntos (qwen2.5:1.5b B: 100% contra 95% correcto) a temperatura 0, así que una o
+dos horas de diferencia entre variantes no son significativas.
+
+#### Pruebas de utilidad en pytest
+
+`tests/evals/test_utility.py` corre la configuración recomendada contra un Ollama real y
+falla si el modelo deja de proponer el ajuste (< 80% de las horas `ADJUST`), ajusta una hora
+tranquila o near-miss (> 5%), mueve la amina al revés (> 5%) o no responde a tiempo. Se salta
+si no hay un Ollama disponible, así que nunca bloquea la suite principal.
+
+```bash
+OLLAMA_URL=http://127.0.0.1:11434 UTILITY_MODEL=qwen2.5:1.5b-instruct pytest tests/evals -v -s
+```
+
+El workflow `Utility evals` la corre semanalmente y a pedido en un runner de GitHub, con
+Ollama en CPU. Validado localmente con 4 núcleos de CPU y sin GPU: 30 casos (10 por clase)
+en 7,5 minutos, 5/5 pruebas pasando (100% de ajustes correctos, 0% near-miss, 0% al revés).
+
 ### Endpoints
 
 | Método | Ruta | Propósito |
@@ -499,6 +671,8 @@ recibió un `HOLD` válido cada segundo: nunca un error, nunca un timeout.
 | `GET` | `/v1/jobs/{job_id}` | `queued` / `running` / `done` (con resultado) / `failed`. |
 | `GET` | `/v1/backends` | Estado del circuit breaker por motor y estado del warm-up. |
 | `GET` | `/v1/audit?limit=50` | Últimas decisiones más `chain_ok` (verificación de la cadena de hashes). |
+| `POST` | `/v1/lab` | Resultado de laboratorio de sílice en concentrado (`asset_id`, `sampled_at`, `silica_pct`, `delay_h`) → contexto del activo. |
+| `GET` | `/v1/context/{asset_id}` | Los hechos que vería el modelo ahora para ese activo. |
 | `GET` | `/v1/schema` | JSON Schemas: `scada_action` (lo que parsea el PLC) y `model_output` (lo que se le impone al motor). |
 | `GET` | `/health` | Liveness; no toca los motores. |
 | `GET` | `/metrics` | Prometheus: `slmgw_inference_total{tier,action,degraded}`, `slmgw_inference_latency_seconds`, `slmgw_rate_limited_total`. |
@@ -566,7 +740,7 @@ python -m venv venv && venv/Scripts/pip install -r requirements-gateway-dev.txt 
 pytest tests/gateway -v
 ```
 
-81 pruebas, sin GPU ni red:
+106 pruebas, sin GPU ni red:
 
 | Archivo | Qué ejercita |
 |---|---|
@@ -575,6 +749,7 @@ pytest tests/gateway -v
 | `test_router.py` | Fallback borde→nube, breaker que salta un motor caído, corte por deadline, failsafe, sin buscar otro backend tras un rechazo físico, inyección, caché, single-flight, recarga, concurrencia + cadena de auditoría intacta. |
 | `test_security_audit.py` | Reglas de inyección (inglés/español, ancho cero escondido), notas operativas benignas, API keys, token bucket, cadena de hashes entre reinicios y detección de manipulación. |
 | `test_api.py` | Contrato REST: 401/422/429, control de escritura, setpoint inseguro nunca escrito, jobs, auditoría, métricas. |
+| `test_context.py` | Hechos y visibilidad según el retraso del laboratorio, artefacto del soft sensor contra persistencia, regla de referencia, verificación de citas, schema acotado por solicitud, formato few-shot, `ContextStore`, compuerta del procedimiento, y que cada caso guardado reproduzca su etiqueta. |
 | `test_protocols.py` | Servidor OPC UA real (asyncua) y esclavo Modbus TCP real (pymodbus) en sockets locales: lectura, escritura, escala de registros, lazo cerrado Modbus → router → Modbus; ruteo del puente MQTT; caché y cola en Redis (fakeredis). |
 
 El job de CI `plant-gateway` corre esta suite y construye la imagen de borde.

@@ -32,7 +32,8 @@ class InferenceBackend(Protocol):
     tier: str
     max_complexity: float
 
-    async def generate(self, system: str, user: str, schema: dict, timeout_s: float) -> str: ...
+    async def generate(self, system: str, user: str, schema: dict, timeout_s: float,
+                       examples: tuple = ()) -> str: ...
 
     async def aclose(self) -> None: ...
 
@@ -73,6 +74,14 @@ class _HttpBackend:
             raise BackendError(f"{self.name}: non-JSON response") from exc
 
 
+def _messages(system: str, user: str, examples) -> list[dict]:
+    msgs = [{"role": "system", "content": system}]
+    for u, a in examples:
+        msgs += [{"role": "user", "content": u}, {"role": "assistant", "content": a}]
+    msgs.append({"role": "user", "content": user})
+    return msgs
+
+
 class OllamaBackend(_HttpBackend):
     async def warmup(self) -> None:
         # Ollama carga el modelo en VRAM con la primera solicitud (~35 s medidos
@@ -81,13 +90,11 @@ class OllamaBackend(_HttpBackend):
         await self._post("/api/generate", {"model": self.settings.model, "prompt": "",
                                            "keep_alive": "30m"}, timeout_s=180.0)
 
-    async def generate(self, system: str, user: str, schema: dict, timeout_s: float) -> str:
+    async def generate(self, system: str, user: str, schema: dict, timeout_s: float,
+                       examples: tuple = ()) -> str:
         body = {
             "model": self.settings.model,
-            "messages": [
-                {"role": "system", "content": system},
-                {"role": "user", "content": user},
-            ],
+            "messages": _messages(system, user, examples),
             "format": schema,
             "stream": False,
             "keep_alive": "30m",
@@ -101,13 +108,11 @@ class OllamaBackend(_HttpBackend):
 
 
 class OpenAICompatBackend(_HttpBackend):
-    async def generate(self, system: str, user: str, schema: dict, timeout_s: float) -> str:
+    async def generate(self, system: str, user: str, schema: dict, timeout_s: float,
+                       examples: tuple = ()) -> str:
         body = {
             "model": self.settings.model,
-            "messages": [
-                {"role": "system", "content": system},
-                {"role": "user", "content": user},
-            ],
+            "messages": _messages(system, user, examples),
             "temperature": 0,
             "seed": 7,
             "max_tokens": 160,

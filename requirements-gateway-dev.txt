@@ -6,3 +6,7 @@ fakeredis==2.39.0
 pandas==2.3.3
 pyarrow==25.0.1
 matplotlib==3.10.9
+# scripts/build_plant_context.py (soft sensor y casos de utilidad) y descarga del dataset
+scikit-learn==1.7.2
+polars==2.0.0
+kaggle==1.7.4.5

@@ -99,6 +99,52 @@ def check_premise(action: ControlAction, telemetry: list[TelemetrySample]) -> st
     return None
 
 
+_SILICA_KINDS = {"lab_last", "lab_prev", "lab_streak", "soft_sensor", "silica_state"}
+_REASON_FACT = {
+    "PH_OUT_OF_RANGE": ("range", "ore_pulp_ph"),
+    "DENSITY_OUT_OF_RANGE": ("range", "ore_pulp_density"),
+}
+
+
+def check_citations(action: ControlAction, ctx) -> tuple[str | None, str | None]:
+    """(motivo de rechazo, aviso). Verifica que la evidencia citada existe y respalda la decisión.
+
+    Solo se rechaza lo que puede ser *falso*: una cita a un hecho inexistente, o un motivo
+    (SILICA_HIGH, PH_OUT_OF_RANGE, ...) sin un hecho citado que efectivamente lo muestre.
+    Eso es una justificación inventada y bloquea un ADJUST.
+
+    No citar el valor actual del tag que se mueve queda como aviso: el paso ya está acotado
+    respecto de ese valor por la gramática (setpoint entero en [actual ± max_step]) y por
+    `check_physics`, así que la omisión no hace inseguro el ajuste. Se intentó forzarlo con
+    `prefixItems` en el schema y Ollama 0.12.6 no lo respeta.
+    """
+    if ctx is None:
+        return None, None
+    cited = []
+    for fid in action.evidence:
+        fact = ctx.get(fid)
+        if fact is None:
+            return f"cited fact {fid} does not exist", None
+        cited.append(fact)
+    false_claims, omissions = [], []
+    if not cited:
+        omissions.append("no evidence cited")
+    if action.action == ActionType.ADJUST_SETPOINT.value:
+        if not any(f.kind == "setpoint" and f.tag == action.target_tag for f in cited):
+            omissions.append(f"ADJUST on {action.target_tag} without citing its current value")
+    if action.reason_code == "SILICA_HIGH":
+        if not any(f.kind in _SILICA_KINDS and f.flag in {"high", "sustained_high"} for f in cited):
+            false_claims.append("SILICA_HIGH without citing a silica fact that is high")
+    if action.reason_code in _REASON_FACT:
+        kind, tag = _REASON_FACT[action.reason_code]
+        if not any(f.kind == kind and f.tag == tag and f.flag == "out_of_range" for f in cited):
+            false_claims.append(f"{action.reason_code} without citing {tag} out of range")
+    warn = "citation check: " + "; ".join(false_claims + omissions) if (false_claims or omissions) else None
+    if false_claims and action.action == ActionType.ADJUST_SETPOINT.value:
+        return "citation check: " + "; ".join(false_claims), warn
+    return None, warn
+
+
 def failsafe_hold(reason: str) -> ControlAction:
     return ControlAction(
         action=ActionType.HOLD,

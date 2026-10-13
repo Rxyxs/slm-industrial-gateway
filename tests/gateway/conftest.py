@@ -24,7 +24,7 @@ class FakeBackend:
         self.calls = 0
         self.last_user_prompt = ""
 
-    async def generate(self, system, user, schema, timeout_s):
+    async def generate(self, system, user, schema, timeout_s, examples=()):
         self.calls += 1
         self.last_user_prompt = user
         step = self.script.pop(0) if self.script else self.default
