@@ -661,6 +661,7 @@ OLLAMA_URL=http://127.0.0.1:11434 UTILITY_MODEL=qwen2.5:1.5b-instruct pytest tes
 El workflow `Utility evals` la corre semanalmente y a pedido en un runner de GitHub, con
 Ollama en CPU. Validado localmente con 4 núcleos de CPU y sin GPU: 30 casos (10 por clase)
 en 7,5 minutos, 5/5 pruebas pasando (100% de ajustes correctos, 0% near-miss, 0% al revés).
+En el runner de GitHub los mismos 30 casos tardan 10,9 minutos y pasan igual.
 
 ### Endpoints
 
