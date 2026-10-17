@@ -62,7 +62,8 @@ class QueryDuckDBTool(BaseIndustrialTool):
     def run(self, params: QueryDuckDBInput) -> Dict[str, Any]:
         safe_query = validate_sql_query(params.query)
 
-        connection = duckdb.connect(database=self.database)
+        read_only = self.database != ":memory:"
+        connection = duckdb.connect(database=self.database, read_only=read_only)
         try:
             cursor = connection.execute(safe_query, params.parameters or [])
             columns = [column[0] for column in cursor.description] if cursor.description else []
@@ -183,12 +184,16 @@ class CalculateRULTool(BaseIndustrialTool):
         }
 
 
-def build_default_registry() -> "ToolRegistry":
-    """Crea un `ToolRegistry` con las tres herramientas industriales ya registradas."""
+def build_default_registry(database: str = ":memory:") -> "ToolRegistry":
+    """Crea un `ToolRegistry` con las tres herramientas industriales ya registradas.
+
+    `database` es la base DuckDB que consulta `query_duckdb` (por ejemplo la tabla horaria
+    real de la planta que arma `scripts/build_eval_prompts.py`).
+    """
     from src.tools.registry import ToolRegistry
 
     registry = ToolRegistry()
-    for tool in (QueryDuckDBTool(), SensorAnomalyCheckTool(), CalculateRULTool()):
+    for tool in (QueryDuckDBTool(database=database), SensorAnomalyCheckTool(), CalculateRULTool()):
         registry.register_tool(
             name=tool.name,
             description=tool.description,

@@ -2,7 +2,8 @@
 después de `VerifierAgent` y antes de que la respuesta llegue al cliente.
 
 Audita la recomendación final en lenguaje natural contra una matriz FIJA de
-límites operativos de diseño (potencia MW, presión PSI, temperatura °C). Si
+límites operativos de diseño (potencia MW, presión PSI, temperatura °C) y de
+los tags escribibles de la planta de flotación (amina, aire, nivel, pH). Si
 algún valor numérico mencionado en la respuesta -- con su unidad -- supera el
 límite de diseño del sitio, intercepta el flujo (nunca deja pasar la
 respuesta) y lanza `SafetyAlertError` con código `SAFETY_ALERT`.
@@ -61,6 +62,32 @@ OPERATIONAL_LIMITS: Mapping[str, OperationalLimit] = MappingProxyType({
         max_value=650.0,
         description="Temperatura crítica máxima de operación segura del equipo del sitio.",
     ),
+    # Planta de flotación: percentil 99 real de cada variable (ver `src/gateway/tags.py`).
+    # Una consigna por sobre lo que la planta operó el 99% del tiempo no se recomienda.
+    "amina_flow_m3h": OperationalLimit(
+        quantity="flujo de amina",
+        unit="m3/h",
+        max_value=671.8,
+        description="P99 del flujo de amina en la planta de flotación.",
+    ),
+    "air_flow_nm3h": OperationalLimit(
+        quantity="flujo de aire de columna",
+        unit="Nm3/h",
+        max_value=303.0,
+        description="P99 del flujo de aire de la columna 01.",
+    ),
+    "column_level_mm": OperationalLimit(
+        quantity="nivel de columna",
+        unit="mm",
+        max_value=854.4,
+        description="P99 del nivel de la columna 01.",
+    ),
+    "pulp_ph": OperationalLimit(
+        quantity="pH de pulpa",
+        unit="pH",
+        max_value=10.6,
+        description="P99 del pH de la pulpa.",
+    ),
 })
 
 # Un patrón por límite, atado a su clave en `OPERATIONAL_LIMITS` -- agregar un
@@ -70,6 +97,12 @@ _PATTERN_BY_LIMIT: Mapping[str, "re.Pattern[str]"] = MappingProxyType({
     "power_mw": re.compile(r"(-?\d+(?:[.,]\d+)?)\s*MW\b", re.IGNORECASE),
     "pressure_psi": re.compile(r"(-?\d+(?:[.,]\d+)?)\s*PSI\b", re.IGNORECASE),
     "temperature_c": re.compile(r"(-?\d+(?:[.,]\d+)?)\s*(?:°\s*C\b|grados\s*C(?:elsius)?\b)", re.IGNORECASE),
+    # "m3/h" sin la N de Nm3/h. El almidón también se mide en m3/h y opera muy por encima de
+    # este límite: una respuesta que cite almidón en m3/h se bloquea (falso positivo aceptado).
+    "amina_flow_m3h": re.compile(r"(\d+(?:[.,]\d+)?)\s*m(?:3|³)\s*/\s*h\b"),
+    "air_flow_nm3h": re.compile(r"(\d+(?:[.,]\d+)?)\s*Nm(?:3|³)\s*/\s*h\b", re.IGNORECASE),
+    "column_level_mm": re.compile(r"(\d+(?:[.,]\d+)?)\s*mm\b"),
+    "pulp_ph": re.compile(r"\bpH\s*(?:de\s*|=\s*|:\s*)?(\d+(?:[.,]\d+)?)"),
 })
 
 
