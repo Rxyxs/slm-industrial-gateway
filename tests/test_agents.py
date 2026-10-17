@@ -284,3 +284,13 @@ def test_api_rejects_prompt_injection_attempt_without_calling_model():
 
     assert response.status_code == 400
     mock_server.generate.assert_not_called()
+
+
+def test_verifier_accepts_numbers_the_user_wrote():
+    from src.agents.verifier_agent import VerifierAgent
+
+    VerifierAgent().verify(
+        "Con umbral 2.5 la última lectura no es anómala.",
+        tool_context={"is_last_reading_anomalous": False},
+        user_text="¿Es anómala con Z = 2.5?",
+    )

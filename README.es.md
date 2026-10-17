@@ -246,97 +246,57 @@ medición y no deben citarse como tal:
 
 ![Quantization Benchmark (ilustrativo)](outputs/reports/quant_benchmark.png)
 
-### Evaluación offline del agente (medición real, 100 prompts)
+### Evaluación offline del agente (medición real, 100 prompts de la planta real)
 
 **Resumen ejecutivo (detalle completo más abajo):**
 
-1. **Brecha de tool-calling en el modelo base de 1.5B**: 94/100 prompts se
-   bloquearon por argumentos de tool inválidos (nombres de campo
-   alucinados), no por diseño de seguridad -- el argumento más concreto que
-   tiene este repositorio a favor de correr su propio pipeline de
-   fine-tuning QLoRA (`src/training/`) antes de producción real.
-2. **El "Safety Block Rate" ingenuo esconde más de lo que muestra**: de 25
-   prompts diseñados para exceder un límite físico, solo 1 disparó un
-   `SafetyAlertError` genuino; el resto se bloqueó antes, por el mismo
-   problema del hallazgo 1. Se identificó y reprodujo además un límite real
-   de `SafetyComplianceAgent`: JSON malformado puede colarse como respuesta
-   "final" sin que su regex detecte el valor peligroso si no queda pegado a
-   la unidad.
+1. **Con solo los nombres de las herramientas en el prompt, el modelo base de 1,5B acierta 0 de 75 preguntas de herramienta.** Inventa nombres de argumentos (`values` en vez de `readings`, `h0…h5` en vez de `timestamps`), y los esquemas estrictos rechazan 76 de las 100 llamadas.
+2. **Listar los argumentos de cada herramienta en el prompt de sistema es el arreglo más barato medido:** las llamadas inválidas bajan de 76 a 17, el chequeo de anomalías devuelve la respuesta correcta en 18/25 casos, y las decisiones de seguridad correctas suben de 12/25 a 20/25. RUL sigue en 0/25 y SQL en 5/25: el modelo todavía no logra convertir una lista de resultados de laboratorio en `timestamps`/`measurements`, ni escribir SQL de DuckDB de forma confiable.
+3. **La auditoría de seguridad solo lee la respuesta del modelo.** 5 de las 13 consignas sobre el límite pasaron porque el modelo respondió "sí" sin repetir el valor, así que la regex no tenía nada que atrapar. La solicitud misma nunca se audita.
 
 ```bash
-python scripts/build_eval_prompts.py     # genera data/eval_prompts.json (100 prompts, 4 categorías)
-python -m src.evaluation.run_offline_eval  # corre el agente real sobre los 100 -> outputs/reports/eval_metrics.json
-python scripts/generate_plots.py           # dibuja eval_metrics.png desde ese JSON
+python scripts/build_eval_prompts.py --csv data/flotation/MiningProcess_Flotation_Plant_Database.csv
+python -m src.evaluation.run_offline_eval                       # solo nombres -> eval_metrics.json
+python -m src.evaluation.run_offline_eval --describe-tool-args \
+       --output outputs/reports/eval_metrics_tool_args.json      # nombres + argumentos
+python scripts/generate_plots.py
 ```
 
-`data/eval_prompts.json` tiene 100 prompts de dominio minero/industrial (no
-los ≥10 que pedía el plan original: la regla del usuario de mínimo 100 casos
-de test antes de reportar cualquier métrica de "qué tan bien funciona" un
-sistema exige ese piso -- con 10 casos, un "52% de bloqueo" es compatible con
-cualquier valor entre ~25% y ~78%, un intervalo demasiado ancho para decir
-algo). 25 por categoría (`anomaly_check`, `rul`, `safety_boundary`,
-`duckdb_analytics`), generados por `scripts/build_eval_prompts.py` combinando
-≥8 plantillas de frase distintas con parámetros/activos que varían
-independientemente, para que ningún par de prompts comparta ni estructura ni
-valores. La mitad de los 25 de `safety_boundary` pide un valor por encima del
-límite físico de diseño (>150 MW / >3000 PSI / >650 °C); la otra mitad,
-deliberadamente dentro de rango, como control negativo.
+**Los prompts salen de la planta de flotación real** (el mismo dataset de Kaggle que usa el gateway de planta, más abajo: 4.097 filas horarias, marzo a septiembre de 2017). `scripts/build_eval_prompts.py` promedia las lecturas de 20 segundos por hora, las escribe en una tabla DuckDB (`data/flotation/plant.duckdb`, no versionada) y arma 25 prompts por categoría, cada uno con su respuesta esperada calculada desde los mismos datos:
 
-`src/evaluation/run_offline_eval.py` corre el `AgentOrchestrator` real (SLM
-real -- Qwen2.5-1.5B, **sin fine-tuning**, ver §"Notas de compatibilidad" --,
-`ToolRegistry` real, guardrails reales) sobre los 100, sin ningún modelo
-juez externo.
+| Categoría | Qué trae el prompt | Respuesta esperada |
+|---|---|---|
+| `anomaly_check` | 10 horas consecutivas reales de amina, aire, nivel, pH, densidad o almidón | la regla de la propia herramienta (\|Z\| ≥ 2,5 en la última lectura); 12 ventanas terminan en un salto real y 13 son control |
+| `rul` | 6 resultados reales de laboratorio de sílice en concentrado | extrapolación lineal hasta el corte de sílice alta de la planta (P90, 4,14%); 20 al alza y 5 no |
+| `safety_boundary` | una consigna para amina, aire, nivel o pH | se bloquea si supera el P99 real de la planta y se permite si no; 13 sobre el límite y 12 valores que la planta sí operó |
+| `duckdb_analytics` | una pregunta sobre la tabla `flotation_hourly`, con sus columnas | el resultado de la misma consulta escrita a mano |
+
+Si todas las llamadas fueran correctas, el harness da 100/100: las etiquetas y el puntaje coinciden. El harness separa *la herramienta se llamó bien* de *la respuesta llegó al usuario*, porque una etapa posterior puede bloquear un resultado correcto.
+
+**Resultados** (Qwen2.5-1.5B-Instruct Q4_K_M, CPU, sin fine-tuning):
+
+| | Solo nombres | Nombres + argumentos |
+|---|---:|---:|
+| Llamadas rechazadas por argumentos inválidos | 76 | 17 |
+| Anomalías: resultado correcto de la herramienta / entregadas | 0 / 0 | 18 / 9 |
+| RUL: resultado correcto de la herramienta / entregadas | 0 / 0 | 0 / 0 |
+| SQL: resultado correcto de la herramienta / entregadas | 0 / 0 | 5 / 0 |
+| Decisiones de seguridad correctas (de 25) | 12 (IC 95% 30–67%) | 20 (IC 95% 61–91%) |
+| … de ellas, un `SafetyAlertError` genuino | 2 | 7 |
+| Consignas sobre el límite que pasaron | 4 | 5 |
+| Tiempo (100 prompts) | 292 s | 452 s |
+
+Los resultados correctos que no llegan al usuario se bloquean más adelante en el pipeline: o el modelo pide una segunda herramienta en vez de responder (se rechaza como tool-call sin resolver), o su respuesta cita un número que no está ni en el resultado de la herramienta ni en la pregunta.
+
+**Un error del verificador corregido de paso.** `VerifierAgent` rechazaba como no sustentadas las respuestas que repetían un número escrito por el usuario, como el umbral 2,5. Ahora acepta los números del propio mensaje del usuario; antes del arreglo, esto bloqueó 21 respuestas.
+
+**¿Qué tan útil es la herramienta de RUL con datos reales?** Independiente del modelo: en las 20 ventanas al alza, la extrapolación lineal erra la hora en que la planta realmente cruzó 4,14% por una mediana de 21 horas, y cae dentro del 50% del tiempo real en solo 4. En 4 de las 5 ventanas donde no proyecta cruce, la planta cruzó igual, entre 3 y 56 horas después. La sílice de laboratorio es demasiado ruidosa para una recta.
 
 ![Eval Metrics](outputs/reports/eval_metrics.png)
 
-**Hallazgo honesto #1: el 94% de los 100 prompts (94/100, las 4 categorías
-por igual, 88%–100%) se bloqueó por argumentos de tool inválidos, no por
-diseño de seguridad.** Este modelo base de 1.5B (sin el fine-tuning QLoRA que
-`src/training/` ya tiene) es muy poco confiable siguiendo el contrato exacto
-de nombres de campo de las tools: alucina nombres de argumento plausibles
-pero incorrectos (`device_id`, `power_level`, `time_period`,
-`vibration_readings` en vez de `readings`...) casi siempre, y el esquema
-Pydantic estricto (`extra="forbid"`, sin coerción de tipos) lo rechaza
-correctamente. Es exactamente el problema que el pipeline de fine-tuning de
-este repositorio existe para resolver -- este resultado es un argumento real
-a favor de correrlo, no una falla del gateway.
+**Faithfulness y Answer Relevancy (DeepEval) siguen sin medirse.** Requieren un modelo juez externo (`gpt-4o-mini` por defecto) con `OPENAI_API_KEY`, no disponible en este entorno. `outputs/reports/eval_metrics.json` los deja en `null`, con una nota que explica por qué.
 
-**Hallazgo honesto #2: por eso mismo, no se puede reportar un "Safety Block
-Rate" de una sola cifra sin decir qué mide.** De los 25 prompts de
-`safety_boundary`, solo **1** disparó un `SafetyAlertError` genuino
-(`SafetyComplianceAgent` auditando una respuesta final real); **22** se
-bloquearon antes, por el mismo problema de argumentos de tool inválidos del
-hallazgo #1 -- bloqueados igual, pero no porque el guardrail de seguridad
-hiciera su trabajo, sino porque el modelo nunca llegó a producir una
-respuesta que auditar. Solo **2** de los 25 llegaron a una respuesta final.
-Una fracción "52% bloqueado" (13/25 correctos según si debía o no bloquearse,
-IC95% [33%, 70%] -- ancho, con n=25) sonaría a que el sistema es
-razonablemente seguro; el desglose real dice que casi no hubo oportunidad de
-observar si `SafetyComplianceAgent` funciona bien o mal, porque casi ningún
-prompt llegó tan lejos.
-
-**Un caso reproducido de forma independiente muestra además un límite real
-del propio `SafetyComplianceAgent`**: cuando el intento de tool-call del
-modelo es JSON sintácticamente inválido (no solo con argumentos incorrectos,
-sino varios objetos JSON pegados), el orquestador lo trata como respuesta
-final en lenguaje natural en vez de rechazarlo -- y el regex de
-`SafetyComplianceAgent` (`\d+\s*°C`, etc.) no detecta el valor peligroso si
-no queda pegado a su unidad en ese texto (p. ej. `"temperature": 700` dentro
-de un JSON roto, sin la cadena literal `700 °C`). Verificado corriendo el
-prompt `safety_14` por separado, dos veces, con el mismo patrón. No se
-generalizó a "todos los casos 'ok' fallan así" sin verificarlo -- uno de los
-otros casos 'ok' (`duckdb_04`) fue una respuesta en lenguaje natural genuina
-y correcta, sin ningún problema.
-
-**Faithfulness y Answer Relevancy (DeepEval) siguen sin medirse.** Requieren
-un modelo juez externo (`gpt-4o-mini` por defecto) con `OPENAI_API_KEY`, no
-disponible en este entorno -- limitación de credenciales de red, no de
-CPU/GPU. `outputs/reports/eval_metrics.json` los deja como `null`, con una
-nota explicando por qué, no con un número estimado.
-
-El JSON completo (los 100 resultados individuales, con el detalle exacto de
-cada bloqueo) queda versionado en
-[`outputs/reports/eval_metrics.json`](outputs/reports/eval_metrics.json).
+Los resultados completos por prompt están versionados en [`eval_metrics.json`](outputs/reports/eval_metrics.json) y [`eval_metrics_tool_args.json`](outputs/reports/eval_metrics_tool_args.json).
 
 ## Gateway de planta (`src/gateway`)
 
@@ -789,7 +749,7 @@ src/
   training/     Pipeline QLoRA (dataset_prep.py, finetune.py)
 data/
   domain_dataset/    Dataset sintético ChatML de dominio (telemetría/sensores)
-  eval_prompts.json  100 prompts de evaluación (4 categorías x 25, ver Benchmarks)
+  eval_prompts.json  100 prompts de evaluación con horas reales de planta (4 categorías x 25)
   models/            Pesos GGUF locales (no versionado; ver instalación)
 scripts/
   quantize.py             Verifica/carga modelos GGUF cuantizados (Q4_K_M, Q8_0)

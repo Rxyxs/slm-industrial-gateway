@@ -65,6 +65,7 @@ class OrchestratorResult:
     text: str
     used_tool: Optional[str] = None
     maintenance_alert: Optional[str] = None
+    tool_result: Optional[dict] = None
 
 
 class AgentOrchestrator:
@@ -97,8 +98,11 @@ class AgentOrchestrator:
         maintenance_advisor: Optional[MaintenanceAdvisorAgent] = None,
         safety_agent: Optional[SafetyComplianceAgent] = None,
         pdm_agent: Optional[PdMAgent] = None,
+        describe_tool_args: bool = False,
     ) -> None:
         self.llm_server = llm_server
+        # Si es True, el prompt de sistema lista los argumentos de cada tool además de su nombre.
+        self.describe_tool_args = describe_tool_args
         self.tool_registry = tool_registry
         self.router_agent = router_agent or RouterAgent(llm_server)
         self.analytics_agent = analytics_agent or AnalyticsAgent(tool_registry)
@@ -113,8 +117,20 @@ class AgentOrchestrator:
                 return message.content
         return ""
 
+    def _describe_tool(self, name: str) -> str:
+        schema = self.tool_registry.get(name).args_schema.model_json_schema()
+        required = set(schema.get("required", []))
+        args = ", ".join(
+            f"{field} ({spec.get('type', 'any')}{', obligatorio' if field in required else ''})"
+            for field, spec in schema.get("properties", {}).items()
+        )
+        return f"{name}(argumentos: {args})"
+
     def _build_prompt(self, messages: List[AgentMessage]) -> str:
-        tool_names = ", ".join(self.tool_registry.list_tools())
+        if self.describe_tool_args:
+            tool_names = "; ".join(self._describe_tool(name) for name in self.tool_registry.list_tools())
+        else:
+            tool_names = ", ".join(self.tool_registry.list_tools())
         preamble = f"system: Herramientas disponibles: {tool_names}. {TOOL_CALL_INSTRUCTIONS}"
         turns = [preamble] + [f"{message.role}: {message.content}" for message in messages]
         turns.append("assistant:")
@@ -152,12 +168,15 @@ class AgentOrchestrator:
         tool_context = None
         used_tool: Optional[str] = None
         maintenance_alert: Optional[str] = None
+        self.last_tool_call: Optional[tuple] = None
 
         if proposal.tool_call is not None:
             used_tool = proposal.tool_call.tool
             with trace_stage("tool_execution", "analytics_agent") as span:
                 analytics_result = self.analytics_agent.execute(proposal.tool_call)
             tool_context = analytics_result.raw_result
+            # Queda a mano para diagnóstico aunque una etapa posterior bloquee la respuesta.
+            self.last_tool_call = (used_tool, tool_context)
 
             with trace_stage("maintenance_assessment", "maintenance_advisor") as span:
                 assessment = self.maintenance_advisor.assess(used_tool, tool_context)
@@ -173,11 +192,14 @@ class AgentOrchestrator:
             proposal = self._propose(follow_up, config)
 
         with trace_stage(STAGE_POST_PROCESSING, "verifier_agent"):
-            self.verifier_agent.verify(proposal.raw_text, tool_context=tool_context)
+            self.verifier_agent.verify(proposal.raw_text, tool_context=tool_context, user_text=user_text)
         with trace_stage("safety_audit", "safety_agent"):
             self.safety_agent.audit(proposal.raw_text)
 
-        return OrchestratorResult(text=proposal.raw_text, used_tool=used_tool, maintenance_alert=maintenance_alert)
+        return OrchestratorResult(
+            text=proposal.raw_text, used_tool=used_tool, maintenance_alert=maintenance_alert,
+            tool_result=tool_context,
+        )
 
     def diagnose_asset(self, asset_id: str, series: List[ConditionSeries]) -> AssetDiagnosis:
         """Delega en `PdMAgent` el diagnóstico de salud y RUL de un activo.

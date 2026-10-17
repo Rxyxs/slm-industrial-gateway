@@ -5,6 +5,10 @@ métrica de "qué tan bien funciona" un modelo o sistema, skill
 `minimo-100-test`: 10 prompts dan un intervalo de confianza demasiado ancho
 para que una tasa de bloqueo signifique algo).
 
+Los prompts usan lecturas reales de la planta de flotación y cada uno trae su respuesta
+esperada (ver `scripts/build_eval_prompts.py`), así que además de qué pasó se mide si el
+agente acertó (`answer_accuracy`).
+
 Corre el `AgentOrchestrator` real (LLM real vía `LLMServer`, `ToolRegistry`
 real, guardrails reales) sobre cada uno de los 100 prompts y mide, sin ningún
 modelo juez externo:
@@ -57,6 +61,9 @@ class PromptOutcome:
     used_tool: Optional[str]
     expected_over_limit: Optional[bool] = None
     detail: str = ""
+    correct: Optional[bool] = None
+    # ¿La tool se llamó bien y devolvió lo esperado, aunque después se bloqueara la respuesta?
+    tool_correct: Optional[bool] = None
 
 
 def wilson_ci(successes: int, n: int, z: float = Z_95) -> tuple[float, float]:
@@ -72,37 +79,91 @@ def wilson_ci(successes: int, n: int, z: float = Z_95) -> tuple[float, float]:
     return (max(0.0, (center - margin) / denom), min(1.0, (center + margin) / denom))
 
 
-def _classify(item: dict, server: LLMServer, registry) -> PromptOutcome:
-    orchestrator = AgentOrchestrator(server, registry)
+def _numbers(value: Any) -> list[float]:
+    if isinstance(value, bool):
+        return []
+    if isinstance(value, (int, float)):
+        return [float(value)]
+    if isinstance(value, (list, tuple)):
+        return [x for v in value for x in _numbers(v)]
+    return []
+
+
+def score_answer(item: dict, used_tool: Optional[str], tool_result: Optional[dict]) -> bool:
+    """¿El resultado de la tool coincide con la respuesta esperada del prompt?
+
+    Solo se puntúan las categorías de tool; `safety_boundary` se puntúa aparte por
+    bloqueo/permiso. Un prompt bloqueado o sin tool cuenta como incorrecto.
+    """
+    category = item["category"]
+    if not isinstance(tool_result, dict):
+        return False
+    if category == "anomaly_check":
+        return used_tool == "sensor_anomaly_check" and (
+            tool_result.get("is_last_reading_anomalous") == item["expected_anomalous"])
+    if category == "rul":
+        if used_tool != "calculate_rul":
+            return False
+        expected, got = item["expected_rul_hours"], tool_result.get("rul_estimate")
+        if expected is None or got is None:
+            return expected is None and got is None
+        return abs(got - expected) <= max(0.5, 0.05 * abs(expected))
+    if category == "duckdb_analytics":
+        if used_tool != "query_duckdb":
+            return False
+        expected = item["expected_value"]
+        tol = max(1e-6, 0.005 * abs(expected))
+        return any(abs(x - expected) <= tol for x in _numbers(tool_result.get("rows", [])))
+    return False
+
+
+def _classify(item: dict, server: LLMServer, registry, describe_tool_args: bool = False) -> PromptOutcome:
+    orchestrator = AgentOrchestrator(server, registry, describe_tool_args=describe_tool_args)
     config = GenerationConfig(max_tokens=96, temperature=0.2)
     expected = item.get("expected_over_limit")
     try:
         result = orchestrator.run([AgentMessage(role="user", content=item["prompt"])], config)
-        return PromptOutcome(item["id"], item["category"], "ok", result.used_tool, expected)
+        outcome = PromptOutcome(item["id"], item["category"], "ok", result.used_tool, expected)
     except SafetyAlertError as exc:
-        return PromptOutcome(item["id"], item["category"], "blocked_safety", None, expected, str(exc))
+        outcome = PromptOutcome(item["id"], item["category"], "blocked_safety", None, expected, str(exc))
     except RequestRejectedError as exc:
-        return PromptOutcome(item["id"], item["category"], "blocked_router", None, expected, str(exc))
+        outcome = PromptOutcome(item["id"], item["category"], "blocked_router", None, expected, str(exc))
     except (GuardrailError, ToolNotFoundError, ToolExecutionError) as exc:
-        return PromptOutcome(item["id"], item["category"], "blocked_guardrail", None, expected, str(exc))
+        outcome = PromptOutcome(item["id"], item["category"], "blocked_guardrail", None, expected, str(exc))
     except Exception as exc:  # noqa: BLE001 -- error real de generación; se registra, no se oculta
-        return PromptOutcome(item["id"], item["category"], "error", None, expected, f"{type(exc).__name__}: {exc}")
+        outcome = PromptOutcome(item["id"], item["category"], "error", None, expected, f"{type(exc).__name__}: {exc}")
+
+    if item["category"] != "safety_boundary":
+        tool_call = getattr(orchestrator, "last_tool_call", None)
+        tool_name, tool_result = tool_call if tool_call else (None, None)
+        outcome.used_tool = outcome.used_tool or tool_name
+        outcome.tool_correct = bool(score_answer(item, tool_name, tool_result))
+        outcome.correct = outcome.status == "ok" and outcome.tool_correct
+    return outcome
 
 
-def run_eval(server: LLMServer, prompts: list[dict], progress: bool = True) -> dict[str, Any]:
-    registry = build_default_registry()
+def run_eval(
+    server: LLMServer,
+    prompts: list[dict],
+    progress: bool = True,
+    database: str = ":memory:",
+    describe_tool_args: bool = False,
+) -> dict[str, Any]:
+    registry = build_default_registry(database=database)
     outcomes: list[PromptOutcome] = []
     start = time.perf_counter()
 
     for i, item in enumerate(prompts):
-        outcome = _classify(item, server, registry)
+        outcome = _classify(item, server, registry, describe_tool_args)
         outcomes.append(outcome)
         if progress:
             elapsed = time.perf_counter() - start
             print(f"[{i + 1:>3}/{len(prompts)}] {outcome.id:<14} -> {outcome.status:<18} "
                   f"tool={outcome.used_tool} ({elapsed:.0f}s transcurridos)")
 
-    return _summarize(prompts, outcomes, time.perf_counter() - start)
+    summary = _summarize(prompts, outcomes, time.perf_counter() - start)
+    summary["describe_tool_args"] = describe_tool_args
+    return summary
 
 
 def _summarize(prompts: list[dict], outcomes: list[PromptOutcome], elapsed_seconds: float) -> dict[str, Any]:
@@ -135,8 +196,20 @@ def _summarize(prompts: list[dict], outcomes: list[PromptOutcome], elapsed_secon
     guardrail_only_blocks = sum(1 for o in safety_outcomes if o.status == "blocked_guardrail")
     reached_final_answer = sum(1 for o in safety_outcomes if o.status == "ok")
 
+    accuracy = {}
+    for category in ("anomaly_check", "rul", "duckdb_analytics"):
+        cat = [o for o in outcomes if o.category == category]
+        hits = sum(1 for o in cat if o.correct)
+        tool_hits = sum(1 for o in cat if o.tool_correct)
+        lo, hi = wilson_ci(hits, len(cat))
+        accuracy[category] = {"correct": hits, "n": len(cat), "value": round(hits / len(cat), 4) if cat else 0.0,
+                              "wilson_ci_95": [round(lo, 4), round(hi, 4)],
+                              "tool_correct": tool_hits,
+                              "tool_called": sum(1 for o in cat if o.used_tool)}
+
     return {
         "n_prompts": len(prompts),
+        "answer_accuracy": accuracy,
         "elapsed_seconds": round(elapsed_seconds, 1),
         "categories": dict(by_category),
         "status_by_category": {k: dict(v) for k, v in status_by_category.items()},
@@ -183,6 +256,10 @@ def main() -> None:  # pragma: no cover - I/O real, correr manualmente o desde C
     parser.add_argument("--prompts", default=str(PROMPTS_PATH))
     parser.add_argument("--output", default=str(DEFAULT_OUTPUT_PATH))
     parser.add_argument("--n-ctx", type=int, default=4096)
+    parser.add_argument("--database", default=str(PROJECT_ROOT / "data" / "flotation" / "plant.duckdb"),
+                        help="Base DuckDB con la tabla horaria real (scripts/build_eval_prompts.py).")
+    parser.add_argument("--describe-tool-args", action="store_true",
+                        help="Lista los argumentos de cada tool en el prompt de sistema.")
     args = parser.parse_args()
 
     prompts = json.loads(Path(args.prompts).read_text(encoding="utf-8"))
@@ -190,7 +267,7 @@ def main() -> None:  # pragma: no cover - I/O real, correr manualmente o desde C
 
     server = LLMServer(args.model_path, n_ctx=args.n_ctx, n_gpu_layers=0)
     try:
-        summary = run_eval(server, prompts)
+        summary = run_eval(server, prompts, database=args.database, describe_tool_args=args.describe_tool_args)
     finally:
         server.close()
 
@@ -202,6 +279,9 @@ def main() -> None:  # pragma: no cover - I/O real, correr manualmente o desde C
           f"({summary['safety_block_rate']['correct']}/{summary['safety_block_rate']['n']}, "
           f"IC95% [{summary['safety_block_rate']['wilson_ci_95'][0]:.1%}, "
           f"{summary['safety_block_rate']['wilson_ci_95'][1]:.1%}])")
+    for category, acc in summary["answer_accuracy"].items():
+        print(f"Aciertos {category}: {acc['correct']}/{acc['n']} entregados, "
+              f"{acc['tool_correct']}/{acc['n']} con la tool correcta, {acc['tool_called']} con tool")
     print(f"Guardado en {output_path}")
 
 
