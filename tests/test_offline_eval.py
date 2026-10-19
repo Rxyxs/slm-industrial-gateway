@@ -6,6 +6,7 @@ intervalo de Wilson -- con el SLM mockeado, sin pesos GGUF ni red.
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
@@ -13,6 +14,7 @@ import pytest
 from src.evaluation.run_offline_eval import (
     PromptOutcome,
     _summarize,
+    score_answer,
     wilson_ci,
 )
 
@@ -110,3 +112,39 @@ def test_summarize_counts_categories_and_statuses():
     assert summary["categories"]["rul"] == 1
     assert summary["status_by_category"]["anomaly_check"]["ok"] == 1
     assert summary["status_by_category"]["anomaly_check"]["error"] == 1
+
+
+def test_score_answer_anomaly_matches_tool_flag():
+    item = {"category": "anomaly_check", "expected_anomalous": True}
+    assert score_answer(item, "sensor_anomaly_check", {"is_last_reading_anomalous": True})
+    assert not score_answer(item, "sensor_anomaly_check", {"is_last_reading_anomalous": False})
+    assert not score_answer(item, "calculate_rul", {"is_last_reading_anomalous": True})
+
+
+def test_score_answer_rul_tolerance_and_no_trend():
+    item = {"category": "rul", "expected_rul_hours": 20.0}
+    assert score_answer(item, "calculate_rul", {"rul_estimate": 20.9})
+    assert not score_answer(item, "calculate_rul", {"rul_estimate": 22.0})
+    flat = {"category": "rul", "expected_rul_hours": None}
+    assert score_answer(flat, "calculate_rul", {"rul_estimate": None})
+    assert not score_answer(flat, "calculate_rul", {"rul_estimate": 5.0})
+
+
+def test_score_answer_duckdb_finds_expected_value_in_rows():
+    item = {"category": "duckdb_analytics", "expected_value": 476.6512}
+    assert score_answer(item, "query_duckdb", {"rows": [[476.65]]})
+    assert not score_answer(item, "query_duckdb", {"rows": [[400.0]]})
+    assert not score_answer(item, "query_duckdb", None)
+
+
+def test_eval_prompts_are_real_plant_cases_with_expected_answers():
+    prompts = json.loads((Path(__file__).resolve().parents[1] / "data" / "eval_prompts.json").read_text(encoding="utf-8"))
+    assert len(prompts) == 100
+    by_cat = {}
+    for p in prompts:
+        by_cat.setdefault(p["category"], []).append(p)
+    assert {k: len(v) for k, v in by_cat.items()} == {
+        "anomaly_check": 25, "rul": 25, "safety_boundary": 25, "duckdb_analytics": 25}
+    assert sum(p["expected_anomalous"] for p in by_cat["anomaly_check"]) == 12
+    assert sum(p["expected_over_limit"] for p in by_cat["safety_boundary"]) == 13
+    assert all("flotation_hourly" in p["prompt"] for p in by_cat["duckdb_analytics"])

@@ -58,16 +58,22 @@ class VerifierAgent:
             return False
         return True
 
-    def _check_faithfulness(self, response_text: str, tool_context: Any) -> Tuple[bool, List[str]]:
+    def _check_faithfulness(
+        self, response_text: str, tool_context: Any, user_text: str = ""
+    ) -> Tuple[bool, List[str]]:
         if tool_context is None:
             return True, []
 
         response_numbers = _extract_numbers(response_text)
+        # Un número que el propio usuario escribió (un umbral, una lectura) no es una alucinación.
         context_numbers = _extract_numbers(json.dumps(tool_context, ensure_ascii=False, default=str))
+        context_numbers |= _extract_numbers(user_text)
         unsupported = sorted(response_numbers - context_numbers)
         return not unsupported, unsupported
 
-    def verify(self, response_text: str, tool_context: Optional[Any] = None) -> VerificationResult:
+    def verify(
+        self, response_text: str, tool_context: Optional[Any] = None, user_text: str = ""
+    ) -> VerificationResult:
         """Verifica `response_text`.
 
         Lanza `GenerationError` si está vacía/no es texto (falla del modelo, no
@@ -83,7 +89,7 @@ class VerifierAgent:
                 "La respuesta final es un tool-call sin resolver, no una respuesta en lenguaje natural."
             )
 
-        is_faithful, unsupported = self._check_faithfulness(response_text, tool_context)
+        is_faithful, unsupported = self._check_faithfulness(response_text, tool_context, user_text)
         if not is_faithful:
             raise FaithfulnessError(
                 "La respuesta menciona valores que no aparecen en el contexto de las herramientas "

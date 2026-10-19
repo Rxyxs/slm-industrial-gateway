@@ -158,7 +158,64 @@ def test_operational_limit_entries_are_frozen():
         limit.max_value = 999999.0  # type: ignore[misc]
 
 
-def test_operational_limits_cover_power_pressure_and_temperature():
-    assert set(OPERATIONAL_LIMITS) == {"power_mw", "pressure_psi", "temperature_c"}
+def test_operational_limits_cover_site_and_plant_quantities():
+    assert set(OPERATIONAL_LIMITS) == {
+        "power_mw", "pressure_psi", "temperature_c",
+        "amina_flow_m3h", "air_flow_nm3h", "column_level_mm", "pulp_ph",
+    }
     for limit in OPERATIONAL_LIMITS.values():
         assert limit.max_value > 0
+
+
+@pytest.mark.parametrize("phrase", [
+    "Se puede llevar el flujo de amina a 796 m3/h.",
+    "Sube el aire de la columna 01 a 340 Nm3/h.",
+    "Fija el nivel de la columna 01 en 903 mm.",
+    "Opera con pH 11.2 en la pulpa.",
+])
+def test_audit_rejects_plant_setpoints_above_real_p99(agent, phrase):
+    with pytest.raises(SafetyAlertError):
+        agent.audit(phrase)
+
+
+def test_audit_approves_plant_setpoints_the_plant_actually_ran(agent):
+    result = agent.audit("Amina a 534 m3/h, aire 250 Nm3/h, nivel 385 mm y pH 9.88 están en rango.")
+    assert result.is_safe
+    assert len(result.checked_values) == 4
+
+
+def test_air_flow_in_nm3h_is_not_read_as_amine_m3h(agent):
+    # 650 Nm3/h supera el límite de aire (303) pero no debe contarse como amina.
+    with pytest.raises(SafetyAlertError) as exc:
+        agent.audit("Aire a 650 Nm3/h.")
+    assert [v.quantity for v in exc.value.violations] == ["flujo de aire de columna"]
+
+
+def test_audit_request_blocks_over_limit_setpoint_before_the_model(agent):
+    with pytest.raises(SafetyAlertError):
+        agent.audit_request("¿Es seguro llevar el flujo de amina a 796 m3/h?")
+
+
+def test_audit_request_allows_values_the_plant_ran(agent):
+    assert agent.audit_request("¿Podemos fijar el aire de la columna 01 en 250 Nm3/h?").is_safe
+
+
+def test_orchestrator_blocks_over_limit_request_even_if_model_says_yes():
+    from unittest.mock import MagicMock
+
+    from src.agents import AgentMessage, AgentOrchestrator
+    from src.engine import GenerationConfig
+    from src.tools import build_default_registry
+
+    server = MagicMock()
+    server.generate.return_value = "Sí, es seguro."
+    orchestrator = AgentOrchestrator(server, build_default_registry())
+    orchestrator.router_agent = MagicMock(check_threat=MagicMock(return_value=None))
+    with pytest.raises(SafetyAlertError):
+        orchestrator.run([AgentMessage(role="user", content="¿Subo el nivel de la columna 01 a 903 mm?")],
+                         GenerationConfig(max_tokens=16))
+    server.generate.assert_not_called()
+
+
+def test_starch_series_in_m3h_is_not_read_as_amine(agent):
+    assert agent.audit_request("Serie de almidón: 2180, 2099, 1549 m3/h. ¿Anomalía?").is_safe
