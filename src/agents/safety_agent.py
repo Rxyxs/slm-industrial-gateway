@@ -97,9 +97,11 @@ _PATTERN_BY_LIMIT: Mapping[str, "re.Pattern[str]"] = MappingProxyType({
     "power_mw": re.compile(r"(-?\d+(?:[.,]\d+)?)\s*MW\b", re.IGNORECASE),
     "pressure_psi": re.compile(r"(-?\d+(?:[.,]\d+)?)\s*PSI\b", re.IGNORECASE),
     "temperature_c": re.compile(r"(-?\d+(?:[.,]\d+)?)\s*(?:°\s*C\b|grados\s*C(?:elsius)?\b)", re.IGNORECASE),
-    # "m3/h" sin la N de Nm3/h. El almidón también se mide en m3/h y opera muy por encima de
-    # este límite: una respuesta que cite almidón en m3/h se bloquea (falso positivo aceptado).
-    "amina_flow_m3h": re.compile(r"(\d+(?:[.,]\d+)?)\s*m(?:3|³)\s*/\s*h\b"),
+    # "m3/h" sin la N de Nm3/h, y solo cuando "amina" aparece justo antes: el almidón también se
+    # mide en m3/h y opera muy por encima de este límite (una serie de almidón no es una consigna).
+    "amina_flow_m3h": re.compile(
+        r"amin\w*[^\d\n]{0,40}?(\d+(?:[.,]\d+)?)\s*m(?:3|³)\s*/\s*h\b"
+        r"|(\d+(?:[.,]\d+)?)\s*m(?:3|³)\s*/\s*h\b[^\d\n]{0,25}?amin", re.IGNORECASE),
     "air_flow_nm3h": re.compile(r"(\d+(?:[.,]\d+)?)\s*Nm(?:3|³)\s*/\s*h\b", re.IGNORECASE),
     "column_level_mm": re.compile(r"(\d+(?:[.,]\d+)?)\s*mm\b"),
     "pulp_ph": re.compile(r"\bpH\s*(?:de\s*|=\s*|:\s*)?(\d+(?:[.,]\d+)?)"),
@@ -148,6 +150,8 @@ def _extract_checked_and_violations(
     for limit_key, pattern in _PATTERN_BY_LIMIT.items():
         limit = OPERATIONAL_LIMITS[limit_key]
         for raw_value in pattern.findall(response_text):
+            if isinstance(raw_value, tuple):  # patrón con alternativas: un grupo por orden
+                raw_value = next(g for g in raw_value if g)
             value = float(raw_value.replace(",", "."))
             checked.append((limit.quantity, value, limit.unit))
             if value > limit.max_value:
@@ -190,4 +194,26 @@ class SafetyComplianceAgent:
             )
             raise SafetyAlertError(f"SAFETY_ALERT: {detail}", violations=tuple(violations))
 
+        return SafetyCheckResult(is_safe=True, checked_values=checked)
+
+    def audit_request(self, request_text: str) -> SafetyCheckResult:
+        """Audita lo que pide el usuario, antes de llamar al modelo.
+
+        `audit` solo ve la respuesta: si el modelo contesta "sí, es seguro" sin repetir
+        el valor, una consigna fuera de límite pasa. Una solicitud que menciona un valor
+        sobre el límite se bloquea acá con el mismo `SafetyAlertError`, sin depender de
+        lo que el modelo escriba. También bloquea preguntas informativas que citen un
+        valor fuera de rango; se prefiere ese falso positivo a dejar pasar una consigna.
+        """
+        if not isinstance(request_text, str):
+            raise TypeError("SafetyComplianceAgent.audit_request requiere una solicitud de tipo str.")
+
+        checked, violations = _extract_checked_and_violations(request_text)
+        if violations:
+            detail = "; ".join(
+                f"{v.quantity} solicitada de {v.value} {v.unit} supera el límite de diseño de "
+                f"{v.limit} {v.unit} ({v.description})"
+                for v in violations
+            )
+            raise SafetyAlertError(f"SAFETY_ALERT: {detail}", violations=tuple(violations))
         return SafetyCheckResult(is_safe=True, checked_values=checked)

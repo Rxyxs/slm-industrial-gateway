@@ -163,6 +163,8 @@ class AgentOrchestrator:
             raise RequestRejectedError(
                 f"Solicitud rechazada por el guardrail de entrada (patrón detectado: {threat})."
             )
+        with trace_stage("safety_audit_request", "safety_agent"):
+            self.safety_agent.audit_request(user_text)
 
         proposal = self._propose(messages, config)
         tool_context = None

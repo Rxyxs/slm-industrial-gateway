@@ -251,8 +251,8 @@ medición y no deben citarse como tal:
 **Resumen ejecutivo (detalle completo más abajo):**
 
 1. **Con solo los nombres de las herramientas en el prompt, el modelo base de 1,5B acierta 0 de 75 preguntas de herramienta.** Inventa nombres de argumentos (`values` en vez de `readings`, `h0…h5` en vez de `timestamps`), y los esquemas estrictos rechazan 76 de las 100 llamadas.
-2. **Listar los argumentos de cada herramienta en el prompt de sistema es el arreglo más barato medido:** las llamadas inválidas bajan de 76 a 17, el chequeo de anomalías devuelve la respuesta correcta en 18/25 casos, y las decisiones de seguridad correctas suben de 12/25 a 20/25. RUL sigue en 0/25 y SQL en 5/25: el modelo todavía no logra convertir una lista de resultados de laboratorio en `timestamps`/`measurements`, ni escribir SQL de DuckDB de forma confiable.
-3. **La auditoría de seguridad solo lee la respuesta del modelo.** 5 de las 13 consignas sobre el límite pasaron porque el modelo respondió "sí" sin repetir el valor, así que la regex no tenía nada que atrapar. La solicitud misma nunca se audita.
+2. **Listar los argumentos de cada herramienta en el prompt de sistema es el arreglo más barato medido:** las llamadas inválidas bajan de 69 a 16 y el chequeo de anomalías devuelve la respuesta correcta en 18/25 casos. RUL sigue en 0/25 y SQL en 2/25: el modelo todavía no logra convertir una lista de resultados de laboratorio en `timestamps`/`measurements`, ni escribir SQL de DuckDB de forma confiable.
+3. **La auditoría de seguridad antes solo leía la respuesta del modelo.** Antes de este cambio, entre 4 y 5 de las 13 consignas sobre el límite pasaban porque el modelo respondía "sí" sin repetir el valor. `SafetyComplianceAgent.audit_request` ahora audita la solicitud antes de llamar al modelo: no pasa ninguna consigna sobre el límite, y con la lista de argumentos todas las decisiones de seguridad son correctas (25/25).
 
 ```bash
 python scripts/build_eval_prompts.py --csv data/flotation/MiningProcess_Flotation_Plant_Database.csv
@@ -277,14 +277,18 @@ Si todas las llamadas fueran correctas, el harness da 100/100: las etiquetas y e
 
 | | Solo nombres | Nombres + argumentos |
 |---|---:|---:|
-| Llamadas rechazadas por argumentos inválidos | 76 | 17 |
-| Anomalías: resultado correcto de la herramienta / entregadas | 0 / 0 | 18 / 9 |
+| Llamadas rechazadas por argumentos inválidos | 69 | 16 |
+| Anomalías: resultado correcto de la herramienta / entregadas | 0 / 0 | 18 / 10 |
 | RUL: resultado correcto de la herramienta / entregadas | 0 / 0 | 0 / 0 |
-| SQL: resultado correcto de la herramienta / entregadas | 0 / 0 | 5 / 0 |
-| Decisiones de seguridad correctas (de 25) | 12 (IC 95% 30–67%) | 20 (IC 95% 61–91%) |
-| … de ellas, un `SafetyAlertError` genuino | 2 | 7 |
-| Consignas sobre el límite que pasaron | 4 | 5 |
-| Tiempo (100 prompts) | 292 s | 452 s |
+| SQL: resultado correcto de la herramienta / entregadas | 0 / 0 | 2 / 0 |
+| Decisiones de seguridad correctas (de 25) | 17 (IC 95% 48–83%) | 25 (IC 95% 87–100%) |
+| … de ellas, un `SafetyAlertError` genuino | 13 | 13 |
+| Consignas sobre el límite que pasaron | 0 | 0 |
+| Tiempo (100 prompts) | 270 s | 429 s |
+
+El modelo muestrea con temperatura 0,2, así que los conteos se mueven un poco entre corridas (una corrida anterior con la misma configuración dio 17 llamadas inválidas y SQL 5/25). Sin la lista de argumentos, las 8 decisiones de seguridad incorrectas son solicitudes dentro de rango bloqueadas por llamadas inválidas, no por la auditoría de seguridad.
+
+**Auditoría de seguridad sobre la solicitud.** Antes de ella, la auditoría que solo lee la respuesta dejaba pasar 4 (solo nombres) y 5 (con argumentos) de las 13 consignas sobre el límite. `audit_request` aplica los mismos límites y patrones al texto del usuario, antes de cualquier llamada al modelo, así que la redacción del modelo ya no importa. Su costo es que una pregunta que cite un valor fuera de rango también se bloquea, aunque sea informativa. El límite de amina solo se aplica cuando el texto nombra la amina, porque el almidón también se mide en m3/h y opera muy por encima de ese límite; sin eso, se bloqueaban dos preguntas de anomalías de almidón.
 
 Los resultados correctos que no llegan al usuario se bloquean más adelante en el pipeline: o el modelo pide una segunda herramienta en vez de responder (se rechaza como tool-call sin resolver), o su respuesta cita un número que no está ni en el resultado de la herramienta ni en la pregunta.
 

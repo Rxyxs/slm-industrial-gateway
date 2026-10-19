@@ -241,8 +241,8 @@ and must not be cited as one:
 **Executive summary (full detail below):**
 
 1. **With only tool names in the prompt, the 1.5B base model gets 0 of 75 tool questions right.** It invents argument names (`values` instead of `readings`, `h0…h5` instead of `timestamps`), and the strict schemas reject 76 of the 100 calls.
-2. **Listing each tool's arguments in the system prompt is the cheapest fix measured:** invalid calls drop from 76 to 17, the anomaly check returns the correct answer in 18/25 cases, and correct safety decisions rise from 12/25 to 20/25. RUL stays at 0/25 and SQL at 5/25: the model still cannot turn a list of lab results into `timestamps`/`measurements`, or write DuckDB SQL reliably.
-3. **The safety audit only reads the model's answer.** 5 of the 13 over-limit requests passed because the model answered "yes" without repeating the value, so the regex had nothing to catch. The request itself is never audited.
+2. **Listing each tool's arguments in the system prompt is the cheapest fix measured:** invalid calls drop from 69 to 16 and the anomaly check returns the correct answer in 18/25 cases. RUL stays at 0/25 and SQL at 2/25: the model still cannot turn a list of lab results into `timestamps`/`measurements`, or write DuckDB SQL reliably.
+3. **The safety audit used to read only the model's answer.** Before this change, 4 to 5 of the 13 over-limit requests passed because the model answered "yes" without repeating the value. `SafetyComplianceAgent.audit_request` now audits the request before the model runs: 0 over-limit requests pass, and with argument listing every safety decision is correct (25/25).
 
 ```bash
 python scripts/build_eval_prompts.py --csv data/flotation/MiningProcess_Flotation_Plant_Database.csv
@@ -267,14 +267,18 @@ If every tool call were correct, the harness scores 100/100: the labels and the 
 
 | | Tool names only | Names + arguments |
 |---|---:|---:|
-| Calls rejected for invalid arguments | 76 | 17 |
-| Anomaly: correct tool result / delivered | 0 / 0 | 18 / 9 |
+| Calls rejected for invalid arguments | 69 | 16 |
+| Anomaly: correct tool result / delivered | 0 / 0 | 18 / 10 |
 | RUL: correct tool result / delivered | 0 / 0 | 0 / 0 |
-| SQL: correct tool result / delivered | 0 / 0 | 5 / 0 |
-| Safety decisions correct (of 25) | 12 (95% CI 30–67%) | 20 (95% CI 61–91%) |
-| … of which a genuine `SafetyAlertError` | 2 | 7 |
-| Over-limit requests that passed | 4 | 5 |
-| Run time (100 prompts) | 292 s | 452 s |
+| SQL: correct tool result / delivered | 0 / 0 | 2 / 0 |
+| Safety decisions correct (of 25) | 17 (95% CI 48–83%) | 25 (95% CI 87–100%) |
+| … of which a genuine `SafetyAlertError` | 13 | 13 |
+| Over-limit requests that passed | 0 | 0 |
+| Run time (100 prompts) | 270 s | 429 s |
+
+The model samples at temperature 0.2, so counts move by a few between runs (an earlier run of the same configuration gave 17 invalid calls and SQL 5/25). Without argument listing, the 8 wrong safety decisions are in-range requests blocked by invalid tool calls, not by the safety audit.
+
+**Request-side safety audit.** Before it, the answer-only audit let 4 (names only) and 5 (with arguments) of the 13 over-limit requests through. `audit_request` uses the same limits and patterns on the user's text, before any model call, so the model's wording no longer matters. Its cost is that a question citing an out-of-range value is blocked too, even if it is informational. The amine limit applies only when the text names amine, because starch is also measured in m3/h and runs far above the amine limit; without that, two starch anomaly questions were blocked.
 
 Correct tool results that never reach the user are blocked later in the pipeline: either the model asks for a second tool instead of answering (rejected as an unresolved tool call), or its answer cites a number that is neither in the tool result nor in the question.
 
