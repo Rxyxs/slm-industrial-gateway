@@ -1,4 +1,4 @@
-[ 🇺🇸 English ] | [ 🇨🇱 [Leer en Español](README.es.md) ]
+[English ] | [[Español](README.es.md) ]
 
 # SLM Industrial Gateway
 
