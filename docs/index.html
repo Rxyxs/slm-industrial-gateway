@@ -54,7 +54,7 @@
 <h2>Offline agent evaluation (real measurement, 100 prompts)</h2>
 <figure>
 <img src="figures/eval_metrics.png" alt="Eval Metrics" loading="lazy">
-<figcaption>**Honest finding #1: 94% of the 100 prompts (94/100, evenly across all 4 categories,</figcaption>
+<figcaption><strong>Faithfulness and Answer Relevancy (DeepEval) remain unmeasured.</strong> They require an external judge model (<code>gpt-4o-mini</code> by default) with an <code>OPENAI_API_KEY</code>, not available in this environment. <code>outputs/reports/eval_metrics.json</code> leaves them as <code>null</code>, with a note explaining why.</figcaption>
 </figure>
 <footer>
 Pablo Reyes · <a href="https://github.com/Rxyxs/slm-industrial-gateway">github.com/Rxyxs/slm-industrial-gateway</a> · MIT<br><br>
